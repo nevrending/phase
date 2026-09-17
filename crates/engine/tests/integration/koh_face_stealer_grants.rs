@@ -7,8 +7,10 @@
 //!   * `ContinuousModification::GrantAllTriggeredAbilitiesOf { ChosenCard }` →
 //!     `expand_granted_triggered_abilities` → `GrantTrigger` on the recipient.
 //!   * `ContinuousModification::GrantAllActivatedAbilitiesOf { ChosenCard }`.
-//!   * `TargetFilter::ChosenCard` (reads the source's `ChosenAttribute::Card`,
-//!     guarded by `zone == Exile`).
+//!   * `TargetFilter::ChosenCard` (reads the source's `ChosenAttribute::Card`;
+//!     the CR 607.2a exile discipline is composed at the emission site as
+//!     `And[ChosenCard, Typed[InZone{Exile}]]` — the reader itself is
+//!     zone-agnostic, CR 607.2d).
 //!   * `Effect::RememberCard` (replace-on-rechoose writer).
 //!
 //! Lead conditions:
@@ -18,7 +20,8 @@
 //!        "gain 2 life" trigger resolved.
 //!   #3 — DUAL invalidation:
 //!        `grant_drops_when_chosen_card_leaves_exile` (the chosen card leaving
-//!        exile drops the grant — CR 400.7) and
+//!        exile stops matching the composed `InZone{Exile}` pin — CR 607.2a +
+//!        CR 400.7) and
 //!        `rechoose_overwrites_so_only_newest_card_is_granted` (re-choosing via the
 //!        real `Effect::RememberCard` writer replaces, never accumulates).
 
@@ -31,8 +34,9 @@ use engine::game::scenario::GameRunner;
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ChosenAttribute, ContinuousModification, Effect,
+    AbilityDefinition, AbilityKind, ChosenAttribute, ContinuousModification, Effect, FilterProp,
     ManaContribution, ManaProduction, StaticDefinition, TargetFilter, TriggerDefinition,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -46,19 +50,36 @@ use engine::types::zones::Zone;
 
 const P0: PlayerId = PlayerId(0);
 
+/// CR 607.2a + CR 607.2d: the exile pin the parser emits for "the last chosen
+/// card" — the shared, zone-agnostic `ChosenCard` reader AND still-in-exile.
+///
+/// Shared with `koh_chosen_card_still_requires_exile` so the runtime host's
+/// statics and the parse-sourced shape assertions cannot drift.
+pub(crate) fn pinned_chosen_card_source() -> TargetFilter {
+    TargetFilter::And {
+        filters: vec![
+            TargetFilter::ChosenCard,
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+            ),
+        ],
+    }
+}
+
 /// Koh's two grant statics, exactly as the parser lowers them (verified by the
 /// parse-shape test below): all activated AND all triggered abilities of the last
-/// chosen card. Affects Koh itself (`SelfRef`).
+/// chosen card, where "the last chosen card" carries the CR 607.2a exile pin.
+/// Affects Koh itself (`SelfRef`).
 fn koh_grant_statics() -> Vec<StaticDefinition> {
     vec![StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
         .modifications(vec![
             ContinuousModification::GrantAllActivatedAbilitiesOf {
-                source: TargetFilter::ChosenCard,
+                source: pinned_chosen_card_source(),
                 cap: None,
             },
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
-                source: TargetFilter::ChosenCard,
+                source: pinned_chosen_card_source(),
             },
         ])]
 }
@@ -227,9 +248,10 @@ fn granted_upkeep_trigger_fires_for_koh() {
 
 // ─── Condition #3a: chosen card leaving exile drops the grant (CR 400.7) ──────
 
-/// CR 400.7 + CR 611.2c: `TargetFilter::ChosenCard` is live and zone-guarded —
-/// once the chosen card is no longer in exile, the grant drops on the next layer
-/// pass (the stored id no longer matches an exiled object).
+/// CR 607.2a + CR 607.2d + CR 400.7: the parsed grant source is
+/// `And[ChosenCard, Typed[InZone{Exile}]]` — the shared reader is zone-agnostic
+/// and the exile pin is the invalidation, so once the chosen card is no longer in
+/// exile the pin stops matching on the next layer pass.
 #[test]
 fn grant_drops_when_chosen_card_leaves_exile() {
     let mut state = GameState::new_two_player(7);
@@ -264,8 +286,8 @@ fn grant_drops_when_chosen_card_leaves_exile() {
     evaluate_layers(&mut state);
     assert!(
         koh_granted_mana_colors(&state, koh).is_empty(),
-        "once the chosen card leaves exile the grant must drop (zone-guarded \
-         ChosenCard no longer matches)"
+        "once the chosen card leaves exile the grant must drop (the composed \
+         InZone{{Exile}} pin no longer matches)"
     );
 }
 
@@ -470,8 +492,9 @@ fn koh_can_choose_opponent_owned_creature_exiled_with_koh() {
 
     // End-to-end payoff — the user-facing bug: with the opponent-owned card now
     // recorded as Koh's last chosen card, the Layer-6 grant
-    // (`TargetFilter::ChosenCard`, owner-agnostic and zone-guarded to Exile)
-    // surfaces that card's activated ability ONTO Koh. This is the whole point
+    // (the parsed `And[ChosenCard, InZone{Exile}]` source — owner-agnostic, with
+    // the CR 607.2a exile pin composed at the emission site) surfaces that
+    // card's activated ability ONTO Koh. This is the whole point
     // of Koh choosing opponent-owned exiled creatures: stealing their abilities.
     evaluate_layers(&mut state);
     assert_eq!(
@@ -526,29 +549,40 @@ fn full_card_parses_no_unimplemented() {
         sub.effect
     );
 
-    // Static: both grant modifications sourced from ChosenCard.
+    // Static: both grant modifications sourced from the CR 607.2a pinned
+    // "the last chosen card" shape. Positive reach-guard first: exactly two
+    // grants present, so the per-modification shape assertions below cannot
+    // pass vacuously on a parse that emitted nothing.
     let grants: Vec<&ContinuousModification> = parsed
         .statics
         .iter()
         .flat_map(|s| s.modifications.iter())
         .collect();
-    assert!(
-        grants.iter().any(|m| matches!(
-            m,
-            ContinuousModification::GrantAllActivatedAbilitiesOf {
-                source: TargetFilter::ChosenCard,
-                ..
-            }
-        )),
-        "static must grant all activated abilities of the chosen card"
+    assert_eq!(
+        grants.len(),
+        2,
+        "Koh's static must lower to exactly two grant modifications, got {grants:?}"
     );
-    assert!(
-        grants.iter().any(|m| matches!(
-            m,
-            ContinuousModification::GrantAllTriggeredAbilitiesOf {
-                source: TargetFilter::ChosenCard,
-            }
-        )),
-        "static must grant all triggered abilities of the chosen card"
+
+    let pinned = pinned_chosen_card_source();
+    let activated_source = grants.iter().find_map(|m| match m {
+        ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. } => Some(source),
+        _ => None,
+    });
+    let triggered_source = grants.iter().find_map(|m| match m {
+        ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => Some(source),
+        _ => None,
+    });
+    assert_eq!(
+        activated_source,
+        Some(&pinned),
+        "the activated grant's source must be the CR 607.2a exile-pinned \
+         ChosenCard shape (zone-agnostic reader + composed InZone{{Exile}})"
+    );
+    assert_eq!(
+        triggered_source,
+        Some(&pinned),
+        "the triggered grant's source must be the CR 607.2a exile-pinned \
+         ChosenCard shape (zone-agnostic reader + composed InZone{{Exile}})"
     );
 }

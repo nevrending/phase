@@ -4553,29 +4553,31 @@ fn filter_inner_for_object(
             .is_some_and(|snapshot| {
                 snapshot.live_object_id(state) == Some(object_id)
             }),
-        // CR 613.1f + CR 611.2c + CR 400.7: the FILTER source's last-remembered
-        // card (`ChosenAttribute::Card`, written by `Effect::RememberCard`). Read
-        // live each layer pass against `source_id` (the permanent that HAS the
-        // granting static — Koh), not the resolving `ability`, so the static grant
-        // resolves it. The `obj.zone == Zone::Exile` guard is the invalidation:
-        // a chosen card that leaves exile becomes a new object (CR 400.7) with a
-        // fresh id, so the stored id stops matching an exiled object and the grant
-        // drops. Re-choosing replaces the stored `Card` (RememberCard is
-        // replace-on-rechoose), so this always reflects the single latest choice.
-        TargetFilter::ChosenCard => {
-            obj.zone == Zone::Exile
-                && source_context_from_filter(
-                    state,
-                    source_id,
-                    source_controller,
-                    ability,
-                    trigger_source,
-                    recipient_id,
-                )
-                .chosen_attributes
-                .iter()
-                .any(|attr| matches!(attr, ChosenAttribute::Card(id) if *id == object_id))
-        }
+        // CR 607.2d + CR 608.2c + CR 613.1f + CR 400.7: the FILTER source's
+        // last-remembered object (`ChosenAttribute::Card`, written by
+        // `Effect::RememberCard`). Read live each layer pass against `source_id`
+        // (the permanent that HAS the granting static — Koh), not the resolving
+        // `ability`, so the static grant resolves it. Identity only: CR 400.7
+        // keeps an object's `ObjectId` stable across zone changes (the engine
+        // bumps `incarnation`), so the remembered id stays matchable wherever
+        // the object went. This is the zone-agnostic reader (CR 607.2d); a
+        // reader whose linked ability requires a zone composes
+        // `FilterProp::InZone` at its emission site (Koh's CR 607.2a exile pin),
+        // which also keeps the same id reachable from the leaves-the-battlefield
+        // look-back path (CR 603.10a). Re-choosing replaces the stored `Card`
+        // (RememberCard is replace-on-rechoose), so this always reflects the
+        // single latest choice.
+        TargetFilter::ChosenCard => source_context_from_filter(
+            state,
+            source_id,
+            source_controller,
+            ability,
+            trigger_source,
+            recipient_id,
+        )
+        .chosen_attributes
+        .iter()
+        .any(|attr| matches!(attr, ChosenAttribute::Card(id) if *id == object_id)),
         // CR 603.7: Match objects in a tracked set from the originating effect.
         // CR 608.2c: `TrackedSetId(0)` is the parser's "most recent set" sentinel.
         // Resolve it via `targeting::resolve_tracked_set_id` — the single
@@ -5079,6 +5081,23 @@ fn zone_change_filter_inner(
             });
             chosen_name.is_some_and(|name| record.name.eq_ignore_ascii_case(name))
         }
+        // CR 607.2d + CR 603.10a + CR 400.7: the remembered object on the
+        // leaves-the-battlefield look-back path — the departing object's stable
+        // ObjectId (CR 400.7: the engine keeps the id and bumps `incarnation`)
+        // is compared against the source's `ChosenAttribute::Card`. Identity
+        // only: a reader needing a zone composes `FilterProp::InZone` at its
+        // emission site (Koh's CR 607.2a exile pin).
+        TargetFilter::ChosenCard => source_context_from_filter(
+            state,
+            source_id,
+            source_controller,
+            ability,
+            trigger_source,
+            None,
+        )
+        .chosen_attributes
+        .iter()
+        .any(|attr| matches!(attr, ChosenAttribute::Card(id) if *id == record.object_id)),
         TargetFilter::ChosenDamageSource { .. } => false,
         TargetFilter::Named { name } => record.name == *name,
 
@@ -5106,7 +5125,6 @@ fn zone_change_filter_inner(
         | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::AmassedArmy
-        | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -9508,6 +9526,133 @@ mod tests {
                 &context,
             ),
             "a legacy attachment snapshot without an incarnation proof must not rebind by ObjectId"
+        );
+    }
+
+    /// CR 607.2d + CR 400.7: `ChosenCard` is the zone-agnostic remembered-object
+    /// reader on the LIVE object path. A remembered object matches wherever it
+    /// currently is (the widened behavior — the old `obj.zone == Zone::Exile`
+    /// guard hardcoded Koh's zone into the shared reader), a different object
+    /// does not, and a source with no recorded choice matches nothing.
+    #[test]
+    fn chosen_card_reader_matches_remembered_object_in_any_zone() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Remembers");
+        let remembered = add_creature(&mut state, PlayerId(0), "Remembered");
+        let other = add_creature(&mut state, PlayerId(0), "Other");
+
+        // Fail-closed until `Effect::RememberCard` writes a choice.
+        assert!(
+            !matches_target_filter(&state, remembered, &TargetFilter::ChosenCard, source),
+            "a source with no recorded choice must match nothing"
+        );
+
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::Card(remembered)];
+
+        assert!(
+            matches_target_filter(&state, remembered, &TargetFilter::ChosenCard, source),
+            "the remembered object must match on the live path wherever it is — \
+             the reader is zone-agnostic (CR 607.2d)"
+        );
+        assert!(
+            !matches_target_filter(&state, other, &TargetFilter::ChosenCard, source),
+            "an object other than the remembered one must not match"
+        );
+    }
+
+    /// CR 607.2a + CR 607.2d + CR 400.7: zone discipline is composed at the
+    /// emission site, not inside the shared reader. The Koh pin
+    /// `And[ChosenCard, Typed[InZone{Exile}]]` matches only while the remembered
+    /// object is in exile; after it leaves, the pin drops while the bare reader
+    /// still identifies it by the CR 400.7-stable id.
+    #[test]
+    fn pinned_chosen_card_reader_drops_when_remembered_object_leaves_exile() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Koh");
+        let remembered = add_creature(&mut state, PlayerId(0), "Remembered");
+
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::Card(remembered)];
+
+        let pinned = TargetFilter::And {
+            filters: vec![
+                TargetFilter::ChosenCard,
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                ),
+            ],
+        };
+
+        // Battlefield: the bare reader matches, the exile pin rejects.
+        assert!(matches_target_filter(
+            &state,
+            remembered,
+            &TargetFilter::ChosenCard,
+            source
+        ));
+        assert!(
+            !matches_target_filter(&state, remembered, &pinned, source),
+            "the exile pin must reject the remembered object outside exile"
+        );
+
+        // In exile: the pin matches.
+        state.objects.get_mut(&remembered).unwrap().zone = Zone::Exile;
+        assert!(
+            matches_target_filter(&state, remembered, &pinned, source),
+            "while the remembered object is in exile, the composed pin matches"
+        );
+
+        // Leaves exile: the pin drops; the bare reader still identifies the id.
+        state.objects.get_mut(&remembered).unwrap().zone = Zone::Graveyard;
+        assert!(
+            !matches_target_filter(&state, remembered, &pinned, source),
+            "once the object leaves exile, the composed pin drops the grant"
+        );
+        assert!(
+            matches_target_filter(&state, remembered, &TargetFilter::ChosenCard, source),
+            "the bare reader is zone-agnostic and still identifies the remembered \
+             object by its CR 400.7-stable id"
+        );
+    }
+
+    /// CR 603.10a + CR 607.2d: on the leaves-the-battlefield look-back path the
+    /// reader compares `ZoneChangeRecord.object_id` against the source's
+    /// `ChosenAttribute::Card`. The remembered object's own departure record
+    /// matches; another object's record does not.
+    #[test]
+    fn chosen_card_reader_matches_remembered_object_on_zone_change_record() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Koh");
+        let remembered = add_creature(&mut state, PlayerId(0), "Remembered");
+        let other = add_creature(&mut state, PlayerId(0), "Other");
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::Card(remembered)];
+
+        let context = FilterContext::from_source(&state, source);
+        let remembered_record =
+            ZoneChangeRecord::test_minimal(remembered, Some(Zone::Battlefield), Zone::Graveyard);
+        let other_record =
+            ZoneChangeRecord::test_minimal(other, Some(Zone::Battlefield), Zone::Graveyard);
+
+        assert!(
+            matches_target_filter_on_zone_change_record(
+                &state,
+                &remembered_record,
+                &TargetFilter::ChosenCard,
+                &context,
+            ),
+            "the remembered object's departure record must match the LKI arm (CR 603.10a)"
+        );
+        assert!(
+            !matches_target_filter_on_zone_change_record(
+                &state,
+                &other_record,
+                &TargetFilter::ChosenCard,
+                &context,
+            ),
+            "another object's departure record must not match the remembered id"
         );
     }
 
