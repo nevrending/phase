@@ -3823,15 +3823,6 @@ fn same_revealed_card_type_condition(
         && positive_subtype == negated_subtype
 }
 
-/// R2 — CR 608.2c + CR 401.4: linked-exile-cast bottom cleanup.
-///
-/// After an optional `CastFromZone` from a linked exile, the trailing "put it on the
-/// bottom" cleanup is normalized in place AND stashed as `prev.else_ability`.
-///
-/// DELIBERATE, DO NOT "FIX": `chain` is cloned into `else_ability` here and is ALSO
-/// linked as `prev`'s sub by the caller below, so the node is reachable via two paths.
-/// That duplication is the existing behavior; preserving it is the point of C4.
-/// Returns whether the repair fired.
 /// CR 607.2d + CR 608.2c: The durability transaction for a standalone,
 /// non-target battlefield-object choice head.
 ///
@@ -3897,6 +3888,15 @@ fn reconcile_object_choice_durability(result: &mut AbilityDefinition, ir: &Effec
     }
 }
 
+/// R2 — CR 608.2c + CR 401.4: linked-exile-cast bottom cleanup.
+///
+/// After an optional `CastFromZone` from a linked exile, the trailing "put it on the
+/// bottom" cleanup is normalized in place AND stashed as `prev.else_ability`.
+///
+/// DELIBERATE, DO NOT "FIX": `chain` is cloned into `else_ability` here and is ALSO
+/// linked as `prev`'s sub by the caller below, so the node is reachable via two paths.
+/// That duplication is the existing behavior; preserving it is the point of C4.
+/// Returns whether the repair fired.
 fn normalize_linked_exile_cast_pair(
     prev: &mut AbilityDefinition,
     chain: &mut AbilityDefinition,

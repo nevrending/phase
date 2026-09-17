@@ -4136,15 +4136,19 @@ fn try_parse_exclusion_list_subject(
 }
 
 /// CR 608.2c + CR 607.2d: Compose an "other than ‹ref› [and ‹ref›]" exclusion
-/// list onto the base population filter. The source item reuses the existing
-/// `FilterProp::Another` composition; the chosen object is
-/// `Not { ChosenCard }` — the shared CR 607.2d remembered-object reader.
-fn apply_object_exclusions(filter: TargetFilter, exclusions: &[ObjectExclusion]) -> TargetFilter {
-    let filter = if exclusions.contains(&ObjectExclusion::Source) {
-        add_another_property(filter)
-    } else {
-        filter
-    };
+/// list onto the base population filter. The source item reuses the shared
+/// `FilterProp::Another` composition — the recursion-aware
+/// `imperative::add_another_to_filter_recursive`, so every typed leg of a
+/// composite base ("creatures and planeswalkers") excludes the source; the
+/// chosen object is `Not { ChosenCard }` — the shared CR 607.2d
+/// remembered-object reader.
+fn apply_object_exclusions(
+    mut filter: TargetFilter,
+    exclusions: &[ObjectExclusion],
+) -> TargetFilter {
+    if exclusions.contains(&ObjectExclusion::Source) {
+        imperative::add_another_to_filter_recursive(&mut filter);
+    }
     if exclusions.contains(&ObjectExclusion::ChosenObject) {
         TargetFilter::And {
             filters: vec![
@@ -7571,7 +7575,7 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
 /// Composite (`Or`/`And`) classes use the recursion-aware
 /// `imperative::add_another_to_filter_recursive` instead — this helper is the
 /// single-`Typed` form consumed by the subject-composition paths below.
-pub(super) fn add_another_property(filter: TargetFilter) -> TargetFilter {
+fn add_another_property(filter: TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut tf) => {
             if !tf

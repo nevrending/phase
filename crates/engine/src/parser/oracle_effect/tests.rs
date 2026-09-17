@@ -67958,6 +67958,48 @@ fn pump_all_excludes_source_and_chosen_object() {
     assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
 }
 
+/// CR 607.2d + CR 611.2a/c: a composite base ("creatures and planeswalkers")
+/// must carry the source exclusion on EVERY typed leg. The lone-`Typed`
+/// composition decorates the whole `Or`, which leaves the source legal on both
+/// type axes; the recursion-aware helper must reach each leg. Companion to
+/// `pump_all_excludes_source_and_chosen_object` (lone-`Typed` base).
+#[test]
+fn pump_all_composite_exclusion_reaches_every_typed_leg() {
+    let def = parse_effect_chain(
+        "Until end of turn, creatures and planeswalkers other than ~ and the chosen creature get -2/-2.",
+        AbilityKind::Spell,
+    );
+    let Effect::PumpAll {
+        target: TargetFilter::And { filters },
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected composite PumpAll, got {:?}", def.effect);
+    };
+    assert_eq!(
+        filters,
+        &vec![
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::Another])
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Planeswalker)
+                            .properties(vec![FilterProp::Another])
+                    ),
+                ],
+            },
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::ChosenCard),
+            },
+        ],
+        "every typed leg of the composite base must exclude the source, and the \
+         chosen-object reader must be appended"
+    );
+    assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+}
+
 /// N5 (`2-C10`): the reader must never leak into `parse_target` — "the chosen
 /// creature" on the TARGET channel keeps its `ParentTarget` anaphor reading
 /// (Celestial Regulator / Duel for Dominance class).

@@ -1726,7 +1726,7 @@ pub(super) fn parse_all_sacrifice<'a>(
 /// composites are walked so a disjunctive class ("creature or planeswalker")
 /// excludes the source on every leg its type could match. Other shapes are left
 /// untouched — the callers' filters are typal by construction.
-fn add_another_to_filter_recursive(filter: &mut TargetFilter) {
+pub(super) fn add_another_to_filter_recursive(filter: &mut TargetFilter) {
     match filter {
         TargetFilter::Typed(typed) if !typed.properties.contains(&FilterProp::Another) => {
             typed.properties.push(FilterProp::Another);
