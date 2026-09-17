@@ -19,7 +19,6 @@ use super::lower::{
     strip_leading_quantifier, strip_trailing_where_x,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
-use super::subject::add_another_property;
 use super::token::try_parse_token;
 use super::{
     attach_controller_if_absent, is_bare_object_pronoun, resolve_it_pronoun, ParseContext,
@@ -1719,7 +1718,15 @@ pub(super) fn parse_all_sacrifice<'a>(
     Some((count, target, rem))
 }
 
-fn add_another_to_sacrifice_filter(filter: &mut TargetFilter) {
+/// Re-apply `FilterProp::Another` to every typed leg of a parsed filter.
+///
+/// The count-word grammar consumes "another " as a bare count of 1, discarding
+/// the source exclusion it encodes, so each grammar that consumes the word
+/// re-applies it here. Typed legs get the property (idempotently); `Or`/`And`
+/// composites are walked so a disjunctive class ("creature or planeswalker")
+/// excludes the source on every leg its type could match. Other shapes are left
+/// untouched — the callers' filters are typal by construction.
+fn add_another_to_filter_recursive(filter: &mut TargetFilter) {
     match filter {
         TargetFilter::Typed(typed) if !typed.properties.contains(&FilterProp::Another) => {
             typed.properties.push(FilterProp::Another);
@@ -1727,7 +1734,7 @@ fn add_another_to_sacrifice_filter(filter: &mut TargetFilter) {
         TargetFilter::Typed(_) => {}
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             for leg in filters {
-                add_another_to_sacrifice_filter(leg);
+                add_another_to_filter_recursive(leg);
             }
         }
         _ => {}
@@ -1887,7 +1894,7 @@ pub(super) fn parse_targeted_action_ast(
             count_word,
             super::super::oracle_util::CountWord::SourceExclusion
         ) {
-            add_another_to_sacrifice_filter(&mut target);
+            add_another_to_filter_recursive(&mut target);
         }
         return Some(TargetedImperativeAst::Sacrifice {
             target,
@@ -4422,7 +4429,7 @@ fn parse_battlefield_object_choice_core(
         };
     // Map the lowercase remainder back to the original chunk text.
     let after = &rest[rest.len() - after_lower.len()..];
-    let (filter, remainder) = parse_target_with_ctx(after.trim_end(), ctx);
+    let (mut filter, remainder) = parse_target_with_ctx(after.trim_end(), ctx);
     // Optional clause terminator ("." or ",") after a whole-phrase filter parse.
     let remainder = opt(alt((tag::<_, _, OracleError<'_>>("."), tag(","))))
         .parse(remainder.trim_end())
@@ -4437,18 +4444,18 @@ fn parse_battlefield_object_choice_core(
     // CR 115.10: the class is affected, not targeted ("choose another creature
     // you control"). "another " scopes the class to objects other than the
     // source, but the quantifier consumed the word as a bare count of 1 — so
-    // re-apply the source exclusion to the parsed filter via the shared
-    // `add_another_property`, exactly as the sacrifice grammar does on its own
-    // typed `CountWord::SourceExclusion` signal. Plain articles stay untouched.
+    // re-apply the source exclusion to the parsed filter. This is the same
+    // shared recursive helper the sacrifice grammar uses on its own typed
+    // `CountWord::SourceExclusion` signal, so a composite class
+    // ("creature or planeswalker") excludes the source on every typed leg.
+    // Plain articles stay untouched.
     //
     // No CR annotation for the re-application itself: this is parser-grammar
     // scoping of the word "another"; the exclusion is CR-annotated at the
     // filter layer (`game/filter.rs` `FilterProp::Another`).
-    let filter = if matches!(count_word, CountWord::SourceExclusion) {
-        add_another_property(filter)
-    } else {
-        filter
-    };
+    if matches!(count_word, CountWord::SourceExclusion) {
+        add_another_to_filter_recursive(&mut filter);
+    }
     Some((filter, min, max))
 }
 

@@ -67673,26 +67673,50 @@ fn gate_a_requires_chain_context_head_and_reader() {
 
 /// CR 115.10 + CR 607.2d + CR 608.2c: the "another " quantifier scopes the
 /// chosen class to exclude the source. The core consumes "another " as a bare
-/// count of 1, so the exclusion is re-applied to the parsed filter the same way
-/// the sacrifice grammar re-applies it. Plain "a " stays a bare count of 1.
+/// count of 1, so the exclusion is re-applied to the parsed filter through the
+/// same recursive helper the sacrifice grammar uses. Plain "a "/"an " stay a
+/// bare count of 1. The composite axis matters because the class predicate
+/// admits `Or` of typed legs — "another " must reach every leg, not just a lone
+/// `Typed`.
 #[test]
 fn battlefield_object_choice_another_scopes_out_the_source() {
     use crate::parser::oracle_ir::ast::ChooseImperativeAst;
 
     const ANOTHER_CHAIN: &str = "Choose another creature you control. Until end of turn, \
          creatures other than ~ and the chosen creature get -2/-2.";
+    const ANOTHER_COMPOSITE_CHAIN: &str =
+        "Choose another creature or planeswalker you control. Until end of turn, \
+         creatures other than ~ and the chosen creature get -2/-2.";
     const PLAIN_CHAIN: &str = "Choose a creature you control. Until end of turn, \
          creatures other than ~ and the chosen creature get -2/-2.";
+    const AN_PLAIN_CHAIN: &str = "Choose an artifact you control. Until end of turn, \
+         creatures other than ~ and the chosen artifact get -2/-2.";
 
     let with_another = TargetFilter::Typed(
         TypedFilter::creature()
             .controller(ControllerRef::You)
             .properties(vec![FilterProp::Another]),
     );
+    let with_another_composite = TargetFilter::Or {
+        filters: vec![
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ),
+            TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker)
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ),
+        ],
+    };
     let plain = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+    let plain_an =
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You));
 
     // AST-level: the shared core is exactly where the quantifier word is
-    // consumed, so pin both sides of the article axis there.
+    // consumed, so pin every side of the article axis there.
     assert_eq!(
         choose_ast_in_chain(
             "choose another creature you control",
@@ -67707,6 +67731,18 @@ fn battlefield_object_choice_another_scopes_out_the_source() {
     );
     assert_eq!(
         choose_ast_in_chain(
+            "choose another creature or planeswalker you control",
+            &ANOTHER_COMPOSITE_CHAIN.to_ascii_lowercase()
+        ),
+        Some(ChooseImperativeAst::BattlefieldObject {
+            filter: with_another_composite.clone(),
+            min: 1,
+            max: Some(1),
+        }),
+        "\"choose another …\" must reach EVERY typed leg of a composite class"
+    );
+    assert_eq!(
+        choose_ast_in_chain(
             "choose a creature you control",
             &PLAIN_CHAIN.to_ascii_lowercase()
         ),
@@ -67717,8 +67753,20 @@ fn battlefield_object_choice_another_scopes_out_the_source() {
         }),
         "\"choose a …\" must stay a bare count of 1 with no source exclusion"
     );
+    assert_eq!(
+        choose_ast_in_chain(
+            "choose an artifact you control",
+            &AN_PLAIN_CHAIN.to_ascii_lowercase()
+        ),
+        Some(ChooseImperativeAst::BattlefieldObject {
+            filter: plain_an,
+            min: 1,
+            max: Some(1),
+        }),
+        "\"choose an …\" must stay a bare count of 1 with no source exclusion"
+    );
 
-    // Lowered: the same fact must survive the tracked-set choice head.
+    // Lowered: the same facts must survive the tracked-set choice head.
     let def = parse_effect_chain(ANOTHER_CHAIN, AbilityKind::Spell);
     let Effect::ChooseObjectsIntoTrackedSet {
         chooser,
@@ -67735,6 +67783,18 @@ fn battlefield_object_choice_another_scopes_out_the_source() {
     assert_eq!(
         filter, &with_another,
         "the lowered choice must exclude the source"
+    );
+
+    let composite_def = parse_effect_chain(ANOTHER_COMPOSITE_CHAIN, AbilityKind::Spell);
+    let Effect::ChooseObjectsIntoTrackedSet { filter, .. } = composite_def.effect.as_ref() else {
+        panic!(
+            "the composite Gate-A-eligible chain must lower to the tracked-set choice, got \
+             {composite_def:#?}"
+        );
+    };
+    assert_eq!(
+        filter, &with_another_composite,
+        "the lowered composite choice must exclude the source on every leg"
     );
 
     let plain_def = parse_effect_chain(PLAIN_CHAIN, AbilityKind::Spell);

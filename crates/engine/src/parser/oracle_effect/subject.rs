@@ -7565,11 +7565,12 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
     None
 }
 
-/// Add `FilterProp::Another` to a target filter, ensuring the source is excluded.
+/// Add `FilterProp::Another` to a lone `Typed` target filter, ensuring the
+/// source is excluded.
 ///
-/// Shared with the battlefield-object choice core (`imperative.rs`), which
-/// re-applies the exclusion the "another " count word consumed — the same
-/// discipline the sacrifice grammar follows.
+/// Composite (`Or`/`And`) classes use the recursion-aware
+/// `imperative::add_another_to_filter_recursive` instead — this helper is the
+/// single-`Typed` form consumed by the subject-composition paths below.
 pub(super) fn add_another_property(filter: TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut tf) => {
