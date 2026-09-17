@@ -4557,16 +4557,18 @@ fn filter_inner_for_object(
         // last-remembered object (`ChosenAttribute::Card`, written by
         // `Effect::RememberCard`). Read live each layer pass against `source_id`
         // (the permanent that HAS the granting static — Koh), not the resolving
-        // `ability`, so the static grant resolves it. Identity only: CR 400.7
-        // keeps an object's `ObjectId` stable across zone changes (the engine
-        // bumps `incarnation`), so the remembered id stays matchable wherever
-        // the object went. This is the zone-agnostic reader (CR 607.2d); a
-        // reader whose linked ability requires a zone composes
-        // `FilterProp::InZone` at its emission site (Koh's CR 607.2a exile pin),
-        // which also keeps the same id reachable from the leaves-the-battlefield
-        // look-back path (CR 603.10a). Re-choosing replaces the stored `Card`
-        // (RememberCard is replace-on-rechoose), so this always reflects the
-        // single latest choice.
+        // `ability`, so the static grant resolves it. Identity only: the ENGINE
+        // keeps an object's `ObjectId` stable across zone changes and bumps
+        // `incarnation`; CR 400.7's "new object" semantics are enforced by the
+        // incarnation/zone gates on the source read, not by the stored id
+        // (pinning the remembered id's incarnation is the chartered post-run
+        // follow-up), so the remembered id stays matchable wherever the object
+        // went. This is the zone-agnostic reader (CR 607.2d); a reader whose
+        // linked ability requires a zone composes `FilterProp::InZone` at its
+        // emission site (Koh's CR 607.2a exile pin), which also keeps the same
+        // id reachable from the leaves-the-battlefield look-back path
+        // (CR 603.10a). Re-choosing replaces the stored `Card` (RememberCard is
+        // replace-on-rechoose), so this always reflects the single latest choice.
         TargetFilter::ChosenCard => source_context_from_filter(
             state,
             source_id,
@@ -5082,11 +5084,17 @@ fn zone_change_filter_inner(
             chosen_name.is_some_and(|name| record.name.eq_ignore_ascii_case(name))
         }
         // CR 607.2d + CR 603.10a + CR 400.7: the remembered object on the
-        // leaves-the-battlefield look-back path — the departing object's stable
-        // ObjectId (CR 400.7: the engine keeps the id and bumps `incarnation`)
-        // is compared against the source's `ChosenAttribute::Card`. Identity
-        // only: a reader needing a zone composes `FilterProp::InZone` at its
-        // emission site (Koh's CR 607.2a exile pin).
+        // leaves-the-battlefield look-back path — the departing object's
+        // engine-stable ObjectId (the ENGINE keeps the id and bumps
+        // `incarnation`; CR 400.7's "new object" semantics are enforced by the
+        // incarnation/zone gates on the source read, not by the stored id, and
+        // pinning the remembered id's incarnation is the chartered post-run
+        // follow-up) is compared against the source's `ChosenAttribute::Card`.
+        // Identity only: a reader needing a zone composes `FilterProp::InZone`
+        // at its emission site (Koh's CR 607.2a exile pin) — on this zone-change
+        // look-back path `InZone` means "departed FROM that zone"
+        // (`record.from_zone`), whereas on the live path it means "currently in
+        // that zone".
         TargetFilter::ChosenCard => source_context_from_filter(
             state,
             source_id,
@@ -6350,6 +6358,34 @@ fn source_context_from_filter<'a>(
             // still live; all other source facts continue to come from `read`.
             lki.chosen_attributes
                 .clone_from(&source.lki.chosen_attributes);
+            // CR 607.2d + CR 608.2c + CR 400.7: the remembered-object reader's
+            // writer (`Effect::RememberCard`) persists `ChosenAttribute::Card`
+            // on the LIVE source object only — unlike source-bound named
+            // choices, it has no resolution-context writer — so the latched
+            // snapshot above can be stale within the very resolution that just
+            // wrote it (e.g. a dependent instruction excluding `Not{ChosenCard}`
+            // would still see the pre-resolution choice). While the source is
+            // still the exact observed incarnation in its expected zone, the
+            // live object is authoritative for that one attribute: drop any
+            // `Card` copied from the context and layer the live entry over the
+            // snapshot. The engine keeps an object's `ObjectId` stable across
+            // zone changes and bumps its `incarnation`, so the identity
+            // comparison is exact; CR 400.7's "new object" semantics are
+            // enforced by `source_read`'s incarnation/zone gate, not by the raw
+            // id (pinning the remembered id's incarnation is the chartered
+            // post-run follow-up), and a departed source keeps the latched
+            // snapshot on the CR 603.10a look-back path.
+            if let crate::types::game_state::TriggerSourceRead::ExactLive(object) = read {
+                lki.chosen_attributes
+                    .retain(|attribute| !matches!(attribute, ChosenAttribute::Card(_)));
+                if let Some(card) = object
+                    .chosen_attributes
+                    .iter()
+                    .find(|attribute| matches!(attribute, ChosenAttribute::Card(_)))
+                {
+                    lki.chosen_attributes.push(card.clone());
+                }
+            }
             (
                 lki,
                 read.attached_to(),
@@ -9653,6 +9689,74 @@ mod tests {
                 &context,
             ),
             "another object's departure record must not match the remembered id"
+        );
+    }
+
+    /// CR 607.2d + CR 608.2c + CR 400.7: `Effect::RememberCard` persists on the
+    /// LIVE source object, not on the resolution chain's latched
+    /// `TriggerSourceContext`, so within one resolution the context's snapshot
+    /// is stale. An exact-live source must layer the live `Card` over it (only
+    /// for that attribute — resolution-local named choices still come from the
+    /// context); a departed source keeps the CR 603.10a latched snapshot.
+    #[test]
+    fn chosen_card_reader_layers_live_card_over_stale_latched_context() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Remembers");
+        let remembered = add_creature(&mut state, PlayerId(0), "Remembered");
+        let stale = add_creature(&mut state, PlayerId(0), "Stale");
+
+        // The chain-latched context, captured before `RememberCard` wrote.
+        let mut context = state
+            .objects
+            .get(&source)
+            .unwrap()
+            .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Battlefield)
+            .trigger_source_context()
+            .unwrap()
+            .clone();
+        context.lki.chosen_attributes = vec![ChosenAttribute::Card(stale)];
+
+        // The live source carries the just-remembered card.
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::Card(remembered)];
+
+        let live_context = FilterContext::from_trigger_source(&context);
+        assert!(
+            super::matches_target_filter(
+                &state,
+                remembered,
+                &TargetFilter::ChosenCard,
+                &live_context,
+            ),
+            "an exact-live source must layer the live `Card` over the stale \
+             latched snapshot (CR 607.2d + CR 608.2c)"
+        );
+        assert!(
+            !super::matches_target_filter(&state, stale, &TargetFilter::ChosenCard, &live_context,),
+            "the stale latched `Card` must be dropped, not unioned with the live one"
+        );
+
+        // Depart the battlefield: `source_read` becomes the CR 603.10a latched
+        // path and the live overlay must NOT apply — the context governs.
+        state.objects.get_mut(&source).unwrap().zone = Zone::Graveyard;
+        let latched_context = FilterContext::from_trigger_source(&context);
+        assert!(
+            super::matches_target_filter(
+                &state,
+                stale,
+                &TargetFilter::ChosenCard,
+                &latched_context,
+            ),
+            "a departed source keeps its latched snapshot (CR 603.10a)"
+        );
+        assert!(
+            !super::matches_target_filter(
+                &state,
+                remembered,
+                &TargetFilter::ChosenCard,
+                &latched_context,
+            ),
+            "a live write must not leak into the latched look-back path"
         );
     }
 

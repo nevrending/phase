@@ -5,9 +5,11 @@
 //! The clauses under test have no parser arm yet, so these tests build the AST
 //! directly (never from the fixture): a choice chain records the chosen creature
 //! through the REAL `Effect::RememberCard` resolver, then reads it from
-//!   * a mass pump (`Effect::PumpAll`, CR 611.2a/c) — Probes A and C, and
+//!   * a mass pump (`Effect::PumpAll`, CR 611.2a/c) — Probes A and C,
 //!   * a leaves-the-battlefield look-back trigger (`valid_card = ChosenCard`,
-//!     CR 603.6c + CR 603.10a) — Probe B.
+//!     CR 603.6c + CR 603.10a) — Probe B, and
+//!   * the same pump behind a REAL `ChangesZone` ETB trigger resolved through
+//!     the trigger pipeline — Probe D.
 //!
 //! CR references (verified against docs/MagicCompRules.txt):
 //!   - CR 607.2d: an ability that causes a player to "choose a [value]" and an
@@ -366,5 +368,132 @@ fn no_legal_choice_still_pumps_and_remembers_nothing() {
         pt(&runner, own_other),
         (Some(1), Some(1)),
         "CR 609.3: the pump still applies to every creature it can affect"
+    );
+}
+
+// ─── Probe D: the same chain as a REAL ChangesZone ETB trigger ───────────────
+
+/// The host's ETB trigger: "When this creature enters, [choose an opponent's
+/// creature, remember it, shrink every other creature except the source and the
+/// remembered one]". Hand-built (Zenos yae Galvus's clause has no parser arm
+/// yet — phase 2) but driven through the REAL trigger pipeline.
+fn etb_choice_chain_trigger() -> TriggerDefinition {
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .valid_card(TargetFilter::SelfRef)
+        .destination(Zone::Battlefield)
+        .execute(choice_chain())
+}
+
+/// CR 603.6a/c + CR 607.2d + CR 608.2c: the discriminating REAL-trigger-path
+/// test for the remembered-object reader. The choice chain is the EXECUTE of an
+/// actual `ChangesZone` ETB trigger: the host moves hand → battlefield through
+/// `move_to_zone`, the trigger is collected by `process_triggers`, and its
+/// resolution parks on the real `WaitingFor::ChooseObjectsSelection` prompt
+/// answered with `GameAction::SelectTargets`.
+///
+/// `Effect::RememberCard` writes `ChosenAttribute::Card` to the LIVE source,
+/// NOT to the resolution chain's latched `TriggerSourceContext`, so the pump's
+/// `Not{ChosenCard}` exclusion only observes the fresh choice if
+/// `source_context_from_filter` layers the live entry over the stale latched
+/// snapshot for an exact-live source. Without that overlay the chosen creature
+/// shrinks to 1/1 (revert-probe); with it the chosen creature stays 3/3.
+#[test]
+fn real_etb_trigger_chain_excludes_the_just_remembered_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // The host starts in HAND so its entry through the real zone-change
+    // pipeline raises the ETB trigger (a builder-placed battlefield permanent
+    // would never fire `ChangesZone`).
+    let host = {
+        let mut builder = scenario.add_creature_to_hand(P0, "Reader Host", 4, 4);
+        builder.with_trigger_definition(etb_choice_chain_trigger());
+        builder.id()
+    };
+    let chosen = scenario.add_creature(P1, "Chosen Face", 3, 3).id();
+    let other_opponent = scenario.add_creature(P1, "Other Opponent", 3, 3).id();
+    let own_other = scenario.add_creature(P0, "Own Other", 3, 3).id();
+
+    let mut runner = scenario.build();
+
+    // Real zone change + real trigger scan: the host's own ETB trigger lands on
+    // the stack with its latched `TriggerSourceContext`.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Battlefield, &mut events);
+    engine::game::triggers::process_triggers(runner.state_mut(), &events);
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == host),
+        "the host's ChangesZone ETB must be on the stack after the real move + scan"
+    );
+
+    // Resolve the trigger through the real stack until its choice prompt.
+    runner.advance_until_stack_empty();
+
+    let WaitingFor::ChooseObjectsSelection {
+        min, max, eligible, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the triggered chain must park on ChooseObjectsSelection, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        (*min, *max),
+        (1, Some(1)),
+        "an exact one-of choice must publish (1, Some(1))"
+    );
+    assert_eq!(
+        eligible.len(),
+        2,
+        "the two opponent creatures must be the whole eligible pool, got {eligible:?}"
+    );
+    assert!(
+        eligible.contains(&TargetRef::Object(chosen)),
+        "the chosen creature must be offered, got {eligible:?}"
+    );
+
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(chosen)],
+        })
+        .expect("select the remembered creature");
+    runner.advance_until_stack_empty();
+
+    // Positive reach-guard: the REAL `RememberCard` resolver ran inside the
+    // trigger's resolution and recorded exactly the chosen id on the live host
+    // (the writer itself is not in question here; the READER is).
+    assert_eq!(
+        remembered_cards(&runner, host),
+        vec![chosen],
+        "the triggered chain's RememberCard must record the chosen creature (CR 608.2c)"
+    );
+
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        pt(&runner, chosen),
+        (Some(3), Some(3)),
+        "the just-remembered creature must be excluded via Not{{ChosenCard}} on the \
+         SAME trigger resolution — the live ChosenAttribute::Card writer must be \
+         visible to the reader even though the latched trigger context predates it"
+    );
+    assert_eq!(
+        pt(&runner, host),
+        (Some(4), Some(4)),
+        "the trigger source is excluded via FilterProp::Another (it must not shrink itself)"
+    );
+    assert_eq!(
+        pt(&runner, other_opponent),
+        (Some(1), Some(1)),
+        "a non-chosen opponent creature must shrink by -2/-2"
+    );
+    assert_eq!(
+        pt(&runner, own_other),
+        (Some(1), Some(1)),
+        "a non-chosen creature of any controller must shrink by -2/-2"
     );
 }
