@@ -33,6 +33,16 @@
 //!
 //! Runtime matrix (V1–V4 from the phase-2 plan §4.10). Each row's doc names the
 //! parser edit whose removal flips it (revert checks captured in the report).
+//!
+//! Fixture boundary: these rows build through `board()`, which uses
+//! `add_real_card` — the card is hydrated from the pre-parsed committed fixture,
+//! i.e. the parser output is cached at fixture-generation time. A bare
+//! parser-arm regression is therefore discriminated directly by the parser unit
+//! tests `zenos_trigger_one_pump_lowers_to_the_choice_chain`,
+//! `chain_reader_walk_finds_population_family_readers`, and
+//! `zenos_leaves_trigger_targets_the_chosen_creature` (engine lib test modules),
+//! not by these runtime rows. Observing a parser revert end-to-end through these
+//! rows requires regenerating the card export and the fixture first.
 
 use super::rules::{
     GameAction, GameRunner, GameScenario, ObjectId, Phase, WaitingFor, Zone, P0, P1,

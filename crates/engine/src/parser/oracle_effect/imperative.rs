@@ -19,6 +19,7 @@ use super::lower::{
     strip_leading_quantifier, strip_trailing_where_x,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
+use super::subject::add_another_property;
 use super::token::try_parse_token;
 use super::{
     attach_controller_if_absent, is_bare_object_pronoun, resolve_it_pronoun, ParseContext,
@@ -69,7 +70,7 @@ use super::super::oracle_target::{
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, merge_or_filters, parse_count_expr,
     parse_mana_symbols, parse_ordinal, parse_rounding_suffix_only, rewrite_quantity_expr_rounding,
-    split_around, starts_with_possessive, TextPair,
+    split_around, starts_with_possessive, CountWord, TextPair,
 };
 
 fn parse_extra_turn(input: &str) -> OracleResult<'_, QuantityExpr> {
@@ -4395,9 +4396,9 @@ fn parse_battlefield_object_choice_core(
     rest_lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<(TargetFilter, u32, Option<u32>)> {
-    let (min, max, after_lower) =
+    let (min, max, after_lower, count_word) =
         if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(rest_lower) {
-            (0u32, None, after)
+            (0u32, None, after, CountWord::Plain)
         } else if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(rest_lower) {
             let (after_count, count) = parse_multi_target_count_expr(after).ok()?;
             // Mirror `multi_target_spec_min_max`: a literal max is concrete; a
@@ -4407,15 +4408,15 @@ fn parse_battlefield_object_choice_core(
                 QuantityExpr::Fixed { value } => u32::try_from(value).ok(),
                 _ => None,
             };
-            (0u32, max, after_count)
-        } else if let Ok((after, _)) = alt((
-            tag::<_, _, OracleError<'_>>("a "),
-            tag("an "),
-            tag("another "),
+            (0u32, max, after_count, CountWord::Plain)
+        } else if let Ok((after, count_word)) = alt((
+            value(CountWord::Plain, tag::<_, _, OracleError<'_>>("a ")),
+            value(CountWord::Plain, tag("an ")),
+            value(CountWord::SourceExclusion, tag("another ")),
         ))
         .parse(rest_lower)
         {
-            (1u32, Some(1u32), after)
+            (1u32, Some(1u32), after, count_word)
         } else {
             return None;
         };
@@ -4433,6 +4434,21 @@ fn parse_battlefield_object_choice_core(
     if !is_battlefield_object_class_filter(&filter) {
         return None;
     }
+    // CR 115.10: the class is affected, not targeted ("choose another creature
+    // you control"). "another " scopes the class to objects other than the
+    // source, but the quantifier consumed the word as a bare count of 1 — so
+    // re-apply the source exclusion to the parsed filter via the shared
+    // `add_another_property`, exactly as the sacrifice grammar does on its own
+    // typed `CountWord::SourceExclusion` signal. Plain articles stay untouched.
+    //
+    // No CR annotation for the re-application itself: this is parser-grammar
+    // scoping of the word "another"; the exclusion is CR-annotated at the
+    // filter layer (`game/filter.rs` `FilterProp::Another`).
+    let filter = if matches!(count_word, CountWord::SourceExclusion) {
+        add_another_property(filter)
+    } else {
+        filter
+    };
     Some((filter, min, max))
 }
 

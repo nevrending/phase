@@ -7566,7 +7566,11 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
 }
 
 /// Add `FilterProp::Another` to a target filter, ensuring the source is excluded.
-fn add_another_property(filter: TargetFilter) -> TargetFilter {
+///
+/// Shared with the battlefield-object choice core (`imperative.rs`), which
+/// re-applies the exclusion the "another " count word consumed — the same
+/// discipline the sacrifice grammar follows.
+pub(super) fn add_another_property(filter: TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut tf) => {
             if !tf

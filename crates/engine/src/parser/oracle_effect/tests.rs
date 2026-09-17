@@ -67671,6 +67671,84 @@ fn gate_a_requires_chain_context_head_and_reader() {
     );
 }
 
+/// CR 115.10 + CR 607.2d + CR 608.2c: the "another " quantifier scopes the
+/// chosen class to exclude the source. The core consumes "another " as a bare
+/// count of 1, so the exclusion is re-applied to the parsed filter the same way
+/// the sacrifice grammar re-applies it. Plain "a " stays a bare count of 1.
+#[test]
+fn battlefield_object_choice_another_scopes_out_the_source() {
+    use crate::parser::oracle_ir::ast::ChooseImperativeAst;
+
+    const ANOTHER_CHAIN: &str = "Choose another creature you control. Until end of turn, \
+         creatures other than ~ and the chosen creature get -2/-2.";
+    const PLAIN_CHAIN: &str = "Choose a creature you control. Until end of turn, \
+         creatures other than ~ and the chosen creature get -2/-2.";
+
+    let with_another = TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::Another]),
+    );
+    let plain = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+
+    // AST-level: the shared core is exactly where the quantifier word is
+    // consumed, so pin both sides of the article axis there.
+    assert_eq!(
+        choose_ast_in_chain(
+            "choose another creature you control",
+            &ANOTHER_CHAIN.to_ascii_lowercase()
+        ),
+        Some(ChooseImperativeAst::BattlefieldObject {
+            filter: with_another.clone(),
+            min: 1,
+            max: Some(1),
+        }),
+        "\"choose another …\" must carry FilterProp::Another"
+    );
+    assert_eq!(
+        choose_ast_in_chain(
+            "choose a creature you control",
+            &PLAIN_CHAIN.to_ascii_lowercase()
+        ),
+        Some(ChooseImperativeAst::BattlefieldObject {
+            filter: plain.clone(),
+            min: 1,
+            max: Some(1),
+        }),
+        "\"choose a …\" must stay a bare count of 1 with no source exclusion"
+    );
+
+    // Lowered: the same fact must survive the tracked-set choice head.
+    let def = parse_effect_chain(ANOTHER_CHAIN, AbilityKind::Spell);
+    let Effect::ChooseObjectsIntoTrackedSet {
+        chooser,
+        filter,
+        min,
+        max,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("the Gate-A-eligible chain must lower to the tracked-set choice, got {def:#?}");
+    };
+    assert_eq!(chooser, &TargetFilter::Controller);
+    assert_eq!((*min, *max), (1, Some(1)));
+    assert_eq!(
+        filter, &with_another,
+        "the lowered choice must exclude the source"
+    );
+
+    let plain_def = parse_effect_chain(PLAIN_CHAIN, AbilityKind::Spell);
+    let Effect::ChooseObjectsIntoTrackedSet { filter, .. } = plain_def.effect.as_ref() else {
+        panic!(
+            "the plain-article control must lower to the tracked-set choice, got {plain_def:#?}"
+        );
+    };
+    assert_eq!(
+        filter, &plain,
+        "the positive control must NOT carry FilterProp::Another"
+    );
+}
+
 /// CR 115.1 + CR 110.1: the class predicate is conservative on every axis it
 /// claims — typal, battlefield-only zones, absolute controller, no `Card` type
 /// (a card is never a battlefield permanent). Building-block test over the
