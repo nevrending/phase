@@ -15,7 +15,7 @@
 //! driver and assert the resolved spell is exiled while a hand cast (no
 //! permission involved) still goes to the graveyard.
 
-use engine::game::casting::can_cast_object_now;
+use engine::game::casting::{can_cast_object_now, spell_objects_available_to_cast};
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -134,6 +134,64 @@ fn maestros_graveyard_cast_blocked_without_creature() {
         can_cast_object_now(runner.state(), P0, spell),
         "reach-guard: a creature P0 controls makes the same cast legal"
     );
+}
+
+/// A {U}{U} instant "Counter target spell." staged in P0's hand, used by the
+/// mirror test to force a creature spell's stack→graveyard exit: a resolving
+/// creature spell enters the battlefield, where the destination replacement
+/// could never be observed.
+fn stage_counterspell(scenario: &mut GameScenario) -> engine::types::identifiers::ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Counterspell", true, "Counter target spell.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 0,
+        })
+        .id()
+}
+
+/// CR 607.1 + CR 614.1a: RUNTIME mirror of the multi-authority fixture — the
+/// destination replacement is elected per permission, never a global flag.
+/// Maestros Ascendancy (instant/sorcery permission, exile destination) and
+/// Karador (creature permission, no destination) are both on the battlefield;
+/// a creature card cast from the graveyard is only eligible under KARADOR's
+/// permission, so when that spell leaves the stack without resolving (countered)
+/// it must go to the graveyard. A global exile flag would send it to exile.
+///
+/// The spell is countered because a resolving creature spell enters the
+/// battlefield — the stack→graveyard put is the only event the destination
+/// replacement can replace for a creature spell.
+#[test]
+fn karador_elected_permission_carries_no_destination_replacement_at_runtime() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    scenario
+        .add_creature(P0, "Karador, Ghost Chieftain", 3, 4)
+        .as_legendary()
+        .with_subtypes(vec!["Spirit", "Centaur"])
+        .from_oracle_text(KARADOR_ORACLE);
+    stage_maestros(&mut scenario);
+    let bear = scenario
+        .add_creature_to_graveyard(P0, "Grave Bear", 2, 2)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let counterspell = stage_counterspell(&mut scenario);
+    scenario.with_mana_pool(P0, pool_units(&[ManaType::Blue, ManaType::Blue]));
+    let mut runner = scenario.build();
+
+    assert!(
+        spell_objects_available_to_cast(runner.state(), P0).contains(&bear),
+        "reach-guard: Karador's creature permission must surface the graveyard card as castable"
+    );
+
+    let mut commit = runner.cast(bear).commit();
+    assert!(
+        commit.state().stack.iter().any(|entry| entry.id == bear),
+        "reach-guard: the Karador-permission creature spell must reach the stack"
+    );
+    let outcome = commit.cast(counterspell).target_object(bear).resolve();
+
+    outcome.assert_zone(&[bear], Zone::Graveyard);
 }
 
 /// CR 607.1 + CR 614.1a: the destination replacement is owned by the ELECTED

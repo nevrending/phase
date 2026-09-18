@@ -2222,11 +2222,13 @@ enum GraveyardDestinationRider {
 /// sentence is recognized only when the shared all-consuming
 /// [`parse_exile_spell_cast_this_way_rider`] recognizes it as the trailing
 /// suffix; any rider text following the sentence makes the outcome `Unmodeled`
-/// (the clause cannot be dropped silently).
+/// (the clause cannot be dropped silently). The search text is the shared
+/// [`EXILE_SPELL_CAST_THIS_WAY_RIDER`] const, so the splitter and the
+/// recognizer cannot drift.
 fn split_exile_spell_cast_this_way_rider(trailing: &str) -> (&str, GraveyardDestinationRider) {
-    const MARKER: &str =
-        "if a spell cast this way would be put into your graveyard, exile it instead";
-    let Ok((_, (before, _after))) = nom_primitives::split_once_on(trailing, MARKER) else {
+    let Ok((_, (before, _after))) =
+        nom_primitives::split_once_on(trailing, EXILE_SPELL_CAST_THIS_WAY_RIDER)
+    else {
         return (trailing, GraveyardDestinationRider::Absent);
     };
     // allow-noncombinator: structural offset back to the rider start so the

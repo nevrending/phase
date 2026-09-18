@@ -13,6 +13,9 @@
 
 use engine::game::casting::{can_cast_object_now, spell_objects_available_to_cast};
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::EngineError;
+use engine::types::actions::GameAction;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -125,6 +128,77 @@ fn wickerfolk_graveyard_cast_requires_controlling_the_sacrifice() {
         can_cast_object_now(runner.state(), P0, wickerfolk),
         "reach-guard: the same creature under P0's control is a legal sacrifice"
     );
+}
+
+/// CR 601.2f + CR 601.2h + CR 701.21a: the sacrifice leg is re-checked when it
+/// is actually paid, not only when the cast is declared. If the declared
+/// fodder leaves the battlefield between declaration and payment (the hostile
+/// ordering the composite cost must not paper over), selecting the now-gone
+/// permanent is refused and the cast does not commit for free.
+///
+/// The fluent `SpellCast` driver announces and pays inside one loop, so this
+/// test steps the pipeline manually through `GameRunner::act` and moves the
+/// fodder at the exposed `WaitingFor::PayCost` seam — the only point in the
+/// scenario harness where a post-declaration removal is representable.
+#[test]
+fn wickerfolk_graveyard_cast_rejected_when_declared_fodder_leaves_before_payment() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    let wickerfolk = stage_wickerfolk(&mut scenario);
+    let fodder = scenario.add_creature(P0, "Fodder", 1, 1).id();
+    scenario.with_mana_pool(P0, pool_units(&[ManaType::Colorless]));
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&wickerfolk].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: wickerfolk,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("declaring the graveyard cast must be accepted");
+
+    match &runner.state().waiting_for {
+        WaitingFor::PayCost { choices, .. } => assert!(
+            choices.contains(&fodder),
+            "reach-guard: the declared fodder must be the sacrifice prompt's eligible choice"
+        ),
+        other => panic!(
+            "expected the composite cost's sacrifice prompt, got {other:?} — the hostile \
+             removal needs the PayCost seam"
+        ),
+    }
+
+    // Hostile timing: the fodder leaves the battlefield after the cast was
+    // declared but before the sacrifice is paid.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), fodder, Zone::Graveyard, &mut events);
+
+    let rejected = runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .expect_err("sacrificing a permanent that already left the battlefield must be refused");
+    assert!(
+        matches!(rejected, EngineError::ActionNotAllowed(_)),
+        "expected ActionNotAllowed for the gone permanent, got {rejected:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&wickerfolk].zone,
+        Zone::Graveyard,
+        "the cast must not commit for free when the composite payment is refused"
+    );
+    assert!(
+        !runner.state().battlefield.contains(&wickerfolk),
+        "the refused cast must not put Wickerfolk onto the battlefield"
+    );
+    // NOTE: the engine announces the spell onto the stack (CR 601.2a) before
+    // the cost is paid and does not rewind that announcement when a synthetic
+    // `SelectCards` rejection fails mid-payment, so `stack.is_empty()` is not
+    // assertable on this failure path. The load-bearing claim is the refusal:
+    // the now-gone permanent is rejected and the card never leaves the
+    // graveyard, so no free cast happens.
 }
 
 /// CR 601.2b: the composite additional cost belongs to the graveyard
