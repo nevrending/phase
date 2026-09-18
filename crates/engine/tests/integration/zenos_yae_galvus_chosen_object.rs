@@ -32,7 +32,8 @@
 //!     stable `ObjectId`; the engine bumps `incarnation`).
 //!
 //! Runtime matrix (V1–V4 from the phase-2 plan §4.10). Each row's doc names the
-//! parser edit whose removal flips it (revert checks captured in the report).
+//! engine-side edit whose removal flips it; rows with no engine discriminator
+//! (V1/V3, prompt-shape) rely on their positive reach-guards.
 //!
 //! Fixture boundary: these rows build through `board()`, which uses
 //! `add_real_card` — the card is hydrated from the pre-parsed committed fixture,
@@ -167,9 +168,11 @@ fn board() -> Board {
 
 // ─── V1: the ETB choice is non-target and remembers the pick ─────────────────
 
-/// V1 (CR 115.1 + CR 607.2d + CR 608.2c/d). Discriminator: disabling the Gate A
-/// detector in `parse_choose_ast` leaves the head `TargetOnly` — a TARGET slot,
-/// so no prompt is ever raised and this test fails at `answer_choice`.
+/// V1 (CR 115.1 + CR 607.2d + CR 608.2c/d). Prompt-shape row: no engine-side
+/// revert flips it. The parser arm it exercises is discriminated directly by
+/// `zenos_trigger_one_pump_lowers_to_the_choice_chain` (a Gate A revert leaves
+/// the head `TargetOnly`, so no prompt would be raised — a fixture-cached
+/// parser revert is not observable here without export + fixture regeneration).
 #[test]
 fn zenos_etb_remembers_only_the_chosen_opponent_creature() {
     let mut board = board();
@@ -213,10 +216,13 @@ fn zenos_etb_remembers_only_the_chosen_opponent_creature() {
 
 // ─── V2: the pump excludes exactly the source and the remembered object ──────
 
-/// V2 (CR 607.2d + CR 611.2a/c). Discriminators: disabling the U4 exclusion-list
-/// arm drops `Not { ChosenCard }` (the degraded `Pump { Any }` path returns), and
-/// disabling the `PumpAll` arm of `chain_references_chosen_card` makes Gate B
-/// restore `TargetOnly` — both flip the P/T assertions below.
+/// V2 (CR 607.2d + CR 611.2a/c). Engine-side discriminators: reverting the
+/// `ExactLive` live-`Card` overlay in `source_context_from_filter`
+/// (game/filter.rs) or the widened `ChosenCard` matcher makes the chosen
+/// creature shrink with the rest, flipping the P/T assertions below. Parser-arm
+/// reverts are discriminated directly by
+/// `chain_reader_walk_finds_population_family_readers` and
+/// `exclusion_list_subject_composes_only_the_new_class`.
 #[test]
 fn zenos_pump_affects_every_creature_except_source_and_chosen() {
     let mut board = board();
@@ -268,9 +274,10 @@ fn zenos_pump_affects_every_creature_except_source_and_chosen() {
 
 // ─── V3: no legal choice → (0, Some(0)), nothing remembered, pump still runs ─
 
-/// V3 (CR 609.3 + CR 607.2d). Discriminator: the same Gate A revert as V1 (no
-/// prompt at all). The positive reach-guard is the exact infeasible tuple plus
-/// the pump still applying to the only creature present.
+/// V3 (CR 609.3 + CR 607.2d). Prompt-shape row: no engine-side revert flips it.
+/// The positive reach-guard is the exact infeasible tuple plus the pump still
+/// applying to the only creature present; the Gate A arm is discriminated
+/// directly by `zenos_trigger_one_pump_lowers_to_the_choice_chain`.
 #[test]
 fn zenos_no_legal_choice_still_pumps_and_remembers_nothing() {
     let Some(db) = load_db() else {
@@ -311,9 +318,11 @@ fn zenos_no_legal_choice_still_pumps_and_remembers_nothing() {
 
 // ─── V4: transform fires once, only for the chosen creature's departure ──────
 
-/// V4 (CR 603.6c + CR 603.10a + CR 607.2d). Discriminator: disabling the U3
-/// trigger-subject arm in `oracle_trigger.rs` leaves the trigger `Unknown`, so
-/// the chosen departure queues nothing and `transformed` stays false.
+/// V4 (CR 603.6c + CR 603.10a + CR 607.2d). Engine-side discriminator:
+/// reverting the `ChosenCard` arm in `zone_change_filter_inner` (game/filter.rs)
+/// leaves the chosen departure queuing nothing, so `transformed` stays false.
+/// The parser arm is discriminated directly by
+/// `zenos_leaves_trigger_targets_the_chosen_creature`.
 #[test]
 fn zenos_transforms_once_only_when_the_chosen_creature_leaves() {
     let mut board = board();
