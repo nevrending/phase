@@ -21,8 +21,8 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 4 | Conjoined / chained second effect clause dropped | 386 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 332 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 226 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
-| 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 209 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
+| 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 167 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 152 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
