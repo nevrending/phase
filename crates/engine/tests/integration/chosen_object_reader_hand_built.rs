@@ -20,8 +20,8 @@
 //!     turn").
 //!   - CR 611.2c: the affected set of an ability-generated continuous effect is
 //!     determined when that effect begins.
-//!   - CR 400.7: a zone change keeps the object's stable `ObjectId` identity
-//!     (the engine bumps `incarnation`), so a remembered id stays comparable.
+//!   - CR 400.7: a zone change creates a new object, so the reader pins both
+//!     the stable `ObjectId` and `incarnation` and matches only that occurrence.
 //!   - CR 603.6c: leaves-the-battlefield abilities trigger on the zone change.
 //!   - CR 603.10a: leaves-the-battlefield abilities look back in time.
 //!   - CR 609.3: an effect that attempts to do something impossible does only

@@ -28,8 +28,8 @@
 //!   - CR 611.2c: the pump's affected set is locked when the effect begins.
 //!   - CR 603.6c: a leaves-the-battlefield trigger watches the zone change.
 //!   - CR 603.10a: leaves-the-battlefield abilities look back in time.
-//!   - CR 400.7: a zone change makes a new object (the remembered id stays the
-//!     stable `ObjectId`; the engine bumps `incarnation`).
+//!   - CR 400.7: a zone change creates a new object, so the reader pins both
+//!     the stable `ObjectId` and `incarnation` and matches only that occurrence.
 //!
 //! Runtime matrix (V1–V4 from the phase-2 plan §4.10). Each row's doc names the
 //! engine-side edit whose removal flips it; rows with no engine discriminator
