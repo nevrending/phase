@@ -108,7 +108,12 @@ fn choice_chain() -> AbilityDefinition {
 
 /// Drive the choice head on `host` to its prompt, assert the published
 /// range/eligible set, then select `chosen`.
-fn drive_choice(runner: &mut GameRunner, host: ObjectId, chosen: ObjectId) {
+fn drive_choice(
+    runner: &mut GameRunner,
+    host: ObjectId,
+    chosen: ObjectId,
+    expected_eligible: &[ObjectId],
+) {
     runner
         .act(GameAction::ActivateAbility {
             source_id: host,
@@ -131,14 +136,16 @@ fn drive_choice(runner: &mut GameRunner, host: ObjectId, chosen: ObjectId) {
         (1, Some(1)),
         "an exact one-of choice must publish (1, Some(1))"
     );
+    let mut actual = eligible.clone();
+    actual.sort();
+    let mut expected_refs: Vec<TargetRef> = expected_eligible
+        .iter()
+        .map(|id| TargetRef::Object(*id))
+        .collect();
+    expected_refs.sort();
     assert_eq!(
-        eligible.len(),
-        2,
-        "the two opponent creatures must be the whole eligible pool, got {eligible:?}"
-    );
-    assert!(
-        eligible.contains(&TargetRef::Object(chosen)),
-        "the chosen creature must be offered, got {eligible:?}"
+        actual, expected_refs,
+        "the eligible pool must be exactly the opponent creatures, got {eligible:?}"
     );
 
     runner
@@ -189,7 +196,7 @@ fn choice_remembers_and_pump_excludes_source_and_chosen() {
     let own_other = scenario.add_creature(P0, "Own Other", 3, 3).id();
 
     let mut runner = scenario.build();
-    drive_choice(&mut runner, host, chosen);
+    drive_choice(&mut runner, host, chosen, &[chosen, other_opponent]);
 
     // Positive reach-guard: the REAL `RememberCard` resolver ran and recorded
     // exactly the chosen id (an absent prompt or a broken writer fails here).
@@ -256,7 +263,7 @@ fn chosen_departure_fires_lki_trigger_only_for_remembered_object() {
 
     let mut runner = scenario.build();
     let life_before = runner.life(P0);
-    drive_choice(&mut runner, host, chosen);
+    drive_choice(&mut runner, host, chosen, &[chosen, other_opponent]);
     assert_eq!(
         remembered_cards(&runner, host),
         vec![chosen],
@@ -465,14 +472,13 @@ fn real_etb_trigger_chain_excludes_the_just_remembered_creature() {
         (1, Some(1)),
         "an exact one-of choice must publish (1, Some(1))"
     );
+    let mut actual = eligible.clone();
+    actual.sort();
+    let mut expected_refs = vec![TargetRef::Object(chosen), TargetRef::Object(other_opponent)];
+    expected_refs.sort();
     assert_eq!(
-        eligible.len(),
-        2,
-        "the two opponent creatures must be the whole eligible pool, got {eligible:?}"
-    );
-    assert!(
-        eligible.contains(&TargetRef::Object(chosen)),
-        "the chosen creature must be offered, got {eligible:?}"
+        actual, expected_refs,
+        "the eligible pool must be exactly the two opponent creatures, got {eligible:?}"
     );
 
     runner

@@ -75,11 +75,12 @@ fn enter_zenos(runner: &mut GameRunner, zenos: ObjectId) {
 }
 
 /// Assert the parked prompt is the choice with the expected cardinality and
-/// eligible count, answer it with `pick` (or an empty selection), and resolve.
+/// exact eligible set, answer it with `pick` (or an empty selection), and
+/// resolve.
 fn answer_choice(
     runner: &mut GameRunner,
     expected: (u32, Option<u32>),
-    expected_eligible: usize,
+    expected_eligible: &[ObjectId],
     pick: Option<ObjectId>,
 ) {
     let WaitingFor::ChooseObjectsSelection {
@@ -96,9 +97,15 @@ fn answer_choice(
         expected,
         "the printed quantifier must publish the exact cardinality range"
     );
+    let mut actual = eligible.clone();
+    actual.sort();
+    let mut expected_refs: Vec<TargetRef> = expected_eligible
+        .iter()
+        .map(|id| TargetRef::Object(*id))
+        .collect();
+    expected_refs.sort();
     assert_eq!(
-        eligible.len(),
-        expected_eligible,
+        actual, expected_refs,
         "the eligible pool must be exactly the battlefield creatures matching the \
          chosen filter, got {eligible:?}"
     );
@@ -190,7 +197,12 @@ fn zenos_etb_remembers_only_the_chosen_opponent_creature() {
     // Eligibility is the class's whole point: the two opponent creatures are
     // offered; Zenos itself and P0's own creature are not (the choice is not a
     // target — CR 115.1 — and its filter is controller-relative).
-    answer_choice(runner, (1, Some(1)), 2, Some(*chosen));
+    answer_choice(
+        runner,
+        (1, Some(1)),
+        &[*chosen, *other_opponent],
+        Some(*chosen),
+    );
     assert_eq!(
         remembered_cards(runner, *zenos),
         vec![*chosen],
@@ -206,7 +218,12 @@ fn zenos_etb_remembers_only_the_chosen_opponent_creature() {
     move_and_scan(runner, *zenos, Zone::Exile);
     move_and_scan(runner, *zenos, Zone::Battlefield);
     runner.advance_until_stack_empty();
-    answer_choice(runner, (1, Some(1)), 2, Some(*other_opponent));
+    answer_choice(
+        runner,
+        (1, Some(1)),
+        &[*chosen, *other_opponent],
+        Some(*other_opponent),
+    );
     assert_eq!(
         remembered_cards(runner, *zenos),
         vec![*other_opponent],
@@ -236,7 +253,12 @@ fn zenos_pump_affects_every_creature_except_source_and_chosen() {
     } = &mut board;
 
     enter_zenos(runner, *zenos);
-    answer_choice(runner, (1, Some(1)), 2, Some(*chosen));
+    answer_choice(
+        runner,
+        (1, Some(1)),
+        &[*chosen, *other_opponent],
+        Some(*chosen),
+    );
 
     evaluate_layers(runner.state_mut());
     assert_eq!(
@@ -296,7 +318,7 @@ fn zenos_no_legal_choice_still_pumps_and_remembers_nothing() {
 
     // CR 609.3: an impossible exact choice clamps to the achievable (0, Some(0))
     // and still raises the prompt with an empty eligible set.
-    answer_choice(&mut runner, (0, Some(0)), 0, None);
+    answer_choice(&mut runner, (0, Some(0)), &[], None);
 
     assert!(
         remembered_cards(&runner, zenos).is_empty(),
@@ -335,7 +357,12 @@ fn zenos_transforms_once_only_when_the_chosen_creature_leaves() {
     } = &mut board;
 
     enter_zenos(runner, *zenos);
-    answer_choice(runner, (1, Some(1)), 2, Some(*chosen));
+    answer_choice(
+        runner,
+        (1, Some(1)),
+        &[*chosen, *other_opponent],
+        Some(*chosen),
+    );
     assert!(!runner.state().objects[zenos].transformed);
 
     // Negative: a NON-chosen opponent creature departs — the look-back reader
@@ -380,11 +407,17 @@ fn zenos_does_not_transform_when_it_itself_leaves() {
         runner,
         zenos,
         chosen,
+        other_opponent,
         ..
     } = &mut board;
 
     enter_zenos(runner, *zenos);
-    answer_choice(runner, (1, Some(1)), 2, Some(*chosen));
+    answer_choice(
+        runner,
+        (1, Some(1)),
+        &[*chosen, *other_opponent],
+        Some(*chosen),
+    );
 
     move_and_scan(runner, *zenos, Zone::Graveyard);
     assert_eq!(
