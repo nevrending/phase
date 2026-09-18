@@ -2416,7 +2416,17 @@ pub enum ChosenAttribute {
     /// is cleared automatically when the source permanent changes zones
     /// (CR 400.7). Replace-on-rechoose: `RememberCard` removes any prior `Card`
     /// before pushing.
-    Card(ObjectId),
+    ///
+    /// CR 400.7: the value is an [`ObjectIncarnationRef`] pin — the chosen
+    /// object's storage id AND its incarnation at choice time (captured by
+    /// `RememberCard` from the live object). An object that changes zones
+    /// becomes a new object at the same storage id with a bumped incarnation,
+    /// so a stale pin deliberately does not match the returned object. The
+    /// pre-migration wire form stored a bare `ObjectId`; the
+    /// `ObjectIncarnationRef` compat shim deserializes that legacy shape to
+    /// [`LEGACY_INCARNATION`], a value no real incarnation can equal, so a
+    /// legacy record matches nothing (fail-closed).
+    Card(ObjectIncarnationRef),
     /// CR 608.2d + CR 122.1: The counter kind chosen from a `ChoiceType::CounterKind`
     /// option list (The Caves of Androzani "choose a counter on it"). Read by
     /// `Effect::PutChosenCounter` ("put an additional counter of that kind on
@@ -7281,12 +7291,14 @@ pub enum TargetFilter {
     /// Models "the chosen ‹object›" links of the object axis, including "the last
     /// chosen card" (Koh, the Face Stealer's Layer-6 grant source).
     ///
-    /// Identity only: the reader compares the live object id / `record.object_id`
-    /// against the remembered id on BOTH object paths — the live matcher
-    /// (`filter_inner_for_object`, CR 607.2d) and the leaves-the-battlefield
-    /// look-back path (`zone_change_filter_inner`, CR 603.10a) — so the remembered
-    /// object stays reachable after it changes zones (CR 400.7: the engine keeps
-    /// the `ObjectId` stable and bumps the incarnation). A reader whose linked
+    /// Identity only: the reader compares the candidate occurrence against the
+    /// source's stored [`ChosenAttribute::Card`] pin on BOTH object paths — the
+    /// live matcher (`filter_inner_for_object`, CR 607.2d) and the
+    /// leaves-the-battlefield look-back path (`zone_change_filter_inner`,
+    /// CR 603.10a). CR 400.7: the pin carries the remembered object's
+    /// incarnation, so an object that left and returned at the same storage id
+    /// is a new object and does not re-match (a legacy bare-id pin deserializes
+    /// to `LEGACY_INCARNATION` and matches nothing). A reader whose linked
     /// ability requires a zone (e.g. Koh's CR 607.2a "exiled with" pin) composes
     /// `FilterProp::InZone` at its emission site instead of hardcoding a zone
     /// here; that is what lets one reader serve both a live Layer-6 grant and a
@@ -17688,9 +17700,11 @@ pub enum Effect {
     /// `TrackedSet { id: TrackedSetId(0) }` (the resolution chain's published
     /// pick, resolved via `resolve_tracked_set_sentinel`); the single recorded
     /// card replaces any prior `ChosenAttribute::Card` (replace-on-rechoose).
-    /// The stored id is durable across the chosen object's zone changes
-    /// (CR 400.7 keeps the `ObjectId` stable); a reader that needs the object in
-    /// a specific zone composes `FilterProp::InZone` at its emission site.
+    /// CR 400.7: the stored value is the chosen object's
+    /// `ObjectIncarnationRef` pin (id + incarnation at choice time), so an
+    /// object that left and returned at the same storage id is a new object and
+    /// no longer matches; a reader that needs the object in a specific zone
+    /// composes `FilterProp::InZone` at its emission site.
     RememberCard {
         target: TargetFilter,
     },

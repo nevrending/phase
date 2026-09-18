@@ -31,6 +31,7 @@ use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::GameRunner;
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
@@ -41,7 +42,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{ExileLink, ExileLinkKind, GameState, WaitingFor};
-use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -125,12 +126,14 @@ fn build_exiled_creature(
     id
 }
 
-/// Record `card` as Koh's last chosen card (what `Effect::RememberCard` writes).
+/// Record `card` as Koh's last chosen card (what `Effect::RememberCard` writes),
+/// pinning the card's incarnation (CR 400.7) exactly as the real writer does.
 fn set_chosen(state: &mut GameState, koh: ObjectId, card: ObjectId) {
+    let pin = ObjectIncarnationRef::from_object(&state.objects[&card]);
     let obj = state.objects.get_mut(&koh).unwrap();
     obj.chosen_attributes
         .retain(|a| !matches!(a, ChosenAttribute::Card(_)));
-    obj.chosen_attributes.push(ChosenAttribute::Card(card));
+    obj.chosen_attributes.push(ChosenAttribute::Card(pin));
 }
 
 /// Parse a single triggered ability from oracle text (for the firing test's
@@ -276,18 +279,107 @@ fn grant_drops_when_chosen_card_leaves_exile() {
         "while the chosen face is in exile, Koh is granted its Green mana ability"
     );
 
-    // The chosen card leaves exile (e.g., it is put into a graveyard). CR 400.7:
-    // it is a new object; the stored id no longer names an exiled object.
-    state.objects.get_mut(&face).unwrap().zone = Zone::Graveyard;
-    if let Some(p) = state.players.iter_mut().find(|p| p.id == P0) {
-        p.graveyard.push_back(face);
-    }
+    // The chosen card leaves exile (e.g., it is put into a graveyard) through
+    // the production zone-change pipeline. CR 400.7: it is a new object; the
+    // stored pin no longer names an exiled occurrence.
+    let mut events = Vec::new();
+    let paused = move_object_for_test(
+        &mut state,
+        ZoneMoveRequest::effect(face, Zone::Graveyard, face),
+        &mut events,
+    );
+    assert!(
+        !paused,
+        "the exile -> graveyard move must terminate, not park on a CR 616.1 \
+         replacement choice"
+    );
 
     evaluate_layers(&mut state);
     assert!(
         koh_granted_mana_colors(&state, koh).is_empty(),
         "once the chosen card leaves exile the grant must drop (the composed \
          InZone{{Exile}} pin no longer matches)"
+    );
+}
+
+/// CR 400.7 + CR 607.2a: the incarnation pin is the invalidation that survives a
+/// round trip. The chosen exiled card gains the grant; leaving exile drops it;
+/// returning to exile at the same storage id creates a NEW object (bumped
+/// incarnation), which the stale pin must NOT re-identify even though the card
+/// is once again an exiled object. Re-choosing the returned object pins the new
+/// incarnation and restores the grant (positive reach-guard for the writer).
+#[test]
+fn grant_stays_dropped_when_chosen_card_returns_to_exile_as_new_object() {
+    let mut state = GameState::new_two_player(7);
+    state.phase = Phase::PreCombatMain;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+
+    let koh = build_koh(&mut state);
+    let face = build_exiled_creature(
+        &mut state,
+        2000,
+        vec![],
+        vec![mana_ability(ManaColor::Green)],
+    );
+
+    // Real writer (`Effect::RememberCard`) pins the exiled occurrence.
+    resolve_remember_card(&mut state, koh, face);
+    evaluate_layers(&mut state);
+    assert_eq!(
+        koh_granted_mana_colors(&state, koh),
+        vec![ManaColor::Green],
+        "while the chosen face is in exile, Koh is granted its Green mana ability"
+    );
+
+    // Leave exile through the production zone-change pipeline.
+    let mut events = Vec::new();
+    assert!(
+        !move_object_for_test(
+            &mut state,
+            ZoneMoveRequest::effect(face, Zone::Graveyard, face),
+            &mut events,
+        ),
+        "the exile -> graveyard move must terminate, not park on a replacement choice"
+    );
+    evaluate_layers(&mut state);
+    assert!(
+        koh_granted_mana_colors(&state, koh).is_empty(),
+        "once the chosen card leaves exile the grant must drop"
+    );
+
+    // Return to exile: same storage id, new incarnation (CR 400.7).
+    let mut events = Vec::new();
+    assert!(
+        !move_object_for_test(
+            &mut state,
+            ZoneMoveRequest::effect(face, Zone::Exile, face),
+            &mut events,
+        ),
+        "the graveyard -> exile move must terminate, not park on a replacement choice"
+    );
+    assert_eq!(
+        state.objects[&face].zone,
+        Zone::Exile,
+        "control: the card is once again an exiled object"
+    );
+    evaluate_layers(&mut state);
+    assert!(
+        koh_granted_mana_colors(&state, koh).is_empty(),
+        "CR 400.7: the returned object is a new object at the same storage id; \
+         the original pin must not re-identify it even though the card is in \
+         exile again"
+    );
+
+    // Re-choosing the returned object pins its new incarnation → grant returns.
+    resolve_remember_card(&mut state, koh, face);
+    evaluate_layers(&mut state);
+    assert_eq!(
+        koh_granted_mana_colors(&state, koh),
+        vec![ManaColor::Green],
+        "re-choosing the returned object must pin the new incarnation and \
+         restore the grant"
     );
 }
 
@@ -479,7 +571,7 @@ fn koh_can_choose_opponent_owned_creature_exiled_with_koh() {
         .chosen_attributes
         .iter()
         .filter_map(|a| match a {
-            ChosenAttribute::Card(id) => Some(*id),
+            ChosenAttribute::Card(pin) => Some(pin.object_id),
             _ => None,
         })
         .collect();

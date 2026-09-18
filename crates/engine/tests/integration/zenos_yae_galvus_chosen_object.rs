@@ -117,7 +117,7 @@ fn remembered_cards(runner: &GameRunner, host: ObjectId) -> Vec<ObjectId> {
         .chosen_attributes
         .iter()
         .filter_map(|attribute| match attribute {
-            ChosenAttribute::Card(id) => Some(*id),
+            ChosenAttribute::Card(pin) => Some(pin.object_id),
             _ => None,
         })
         .collect()

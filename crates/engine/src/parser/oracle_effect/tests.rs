@@ -67654,6 +67654,26 @@ fn gate_a_requires_chain_context_head_and_reader() {
         "Ticking Mime Bomb's nested choose chunk must decline in its measured chain context"
     );
 
+    // Positive reach-guard for that nested negative: the SAME chunk, head-led in
+    // a reader-bearing chain, must fire. Without this the negative is vacuous —
+    // a chain-head gate that rejected the chunk outright (rather than at the
+    // nested position) would decline it identically.
+    let tmb_head_led_chain = "choose a creature you don't control. then this creature deals damage equal to twice the number of robots you control to the chosen creature.";
+    let tmb_head_led = choose_ast_in_chain(tmb_chunk, tmb_head_led_chain);
+    let Some(ChooseImperativeAst::BattlefieldObject {
+        filter: TargetFilter::Typed(tf),
+        min: 1,
+        max: Some(1),
+    }) = tmb_head_led
+    else {
+        panic!("the head-led TMB chunk must fire, got {tmb_head_led:?}");
+    };
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::Opponent),
+        "the head-led TMB chunk's class must be the opponent-controlled creature"
+    );
+
     // Fail-closed: the same positive chunk with NO chain context declines (the
     // permanent control `zenos_bare_parse_effect_choice_stays_target_only`
     // pins the same fact through the public `parse_effect` seam).
@@ -68014,7 +68034,7 @@ fn chosen_object_reader_never_touches_parse_target() {
     assert_eq!(rest, "");
 }
 
-/// CR 607.2d + CR 115.1 + CR 608.2d: Gate B restores Gideon's Sacrifice
+/// CR 115.1 + CR 608.2c + CR 608.2d + CR 614.1a + CR 614.9: Gate B restores Gideon's Sacrifice
 /// byte-for-byte (`2-C3`): the head-shape detector and the reader TEXT both
 /// match ("the chosen permanent"), but the assembled tree's reader is
 /// `DamageRedirectTarget::ChosenTarget` — not the remembered-object reader — so

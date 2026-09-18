@@ -975,24 +975,16 @@ pub fn parse_chosen_object_reference(input: &str) -> OracleResult<'_, TargetFilt
 
 /// CR 607.2d: Word-boundary scan for any "the chosen &lt;battlefield object&gt;" reader
 /// in an already-lowercase text. Tries [`parse_chosen_object_reference`] at every
-/// word boundary, so a phrase that merely CONTAINS the words (a longer noun
-/// phrase, a possessive, a plural) does not count — the same scanning discipline
-/// as `scan_timing_restrictions`/`scan_for_phase`.
+/// word boundary via the shared [`super::primitives::scan_at_word_boundaries`]
+/// primitive, so a phrase that merely CONTAINS the words (a longer noun phrase,
+/// a possessive, a plural) does not count — the same scanning discipline as
+/// `scan_timing_restrictions`/`scan_for_phase`.
 ///
 /// This is the single reader-scan authority shared by Gate A (the parse-time
 /// chain gate in `imperative.rs`) and Gate B (the assembly-time IR-fragment
 /// gate), so the two consideration sets can never drift.
 pub(crate) fn chain_text_mentions_chosen_object(input_lower: &str) -> bool {
-    let mut remaining = input_lower;
-    while !remaining.is_empty() {
-        if parse_chosen_object_reference(remaining).is_ok() {
-            return true;
-        }
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
-    }
-    false
+    super::primitives::scan_at_word_boundaries(input_lower, parse_chosen_object_reference).is_some()
 }
 
 /// CR 608.2c: One item of an "other than ‹ref› and ‹ref›" exclusion list on a

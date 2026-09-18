@@ -31,6 +31,7 @@ use super::rules::{
     GameAction, GameRunner, GameScenario, ObjectId, Phase, WaitingFor, Zone, P0, P1,
 };
 use engine::game::layers::evaluate_layers;
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ChosenAttribute, ControllerRef, Duration, Effect, FilterProp,
     PtValue, QuantityExpr, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
@@ -154,7 +155,7 @@ fn remembered_cards(runner: &GameRunner, host: ObjectId) -> Vec<ObjectId> {
         .chosen_attributes
         .iter()
         .filter_map(|attribute| match attribute {
-            ChosenAttribute::Card(id) => Some(*id),
+            ChosenAttribute::Card(pin) => Some(pin.object_id),
             _ => None,
         })
         .collect()
@@ -265,11 +266,13 @@ fn chosen_departure_fires_lki_trigger_only_for_remembered_object() {
     // Negative: the NON-chosen opponent departs — the look-back reader must not
     // re-identify it, so no trigger queues and no life is gained.
     let mut events = Vec::new();
-    engine::game::zones::move_to_zone(
-        runner.state_mut(),
-        other_opponent,
-        Zone::Graveyard,
-        &mut events,
+    assert!(
+        !move_object_for_test(
+            runner.state_mut(),
+            ZoneMoveRequest::effect(other_opponent, Zone::Graveyard, other_opponent),
+            &mut events,
+        ),
+        "the non-chosen departure must terminate, not park on a replacement choice"
     );
     engine::game::triggers::process_triggers(runner.state_mut(), &events);
     assert_eq!(
@@ -283,10 +286,17 @@ fn chosen_departure_fires_lki_trigger_only_for_remembered_object() {
         "the silent non-chosen departure must not gain life"
     );
 
-    // Positive: the REMEMBERED object departs — the LKI arm matches its
-    // `ZoneChangeRecord.object_id` against the source's remembered id.
+    // Positive: the REMEMBERED object departs — the LKI arm matches the
+    // record's own pre-change occurrence against the source's remembered pin.
     let mut events = Vec::new();
-    engine::game::zones::move_to_zone(runner.state_mut(), chosen, Zone::Graveyard, &mut events);
+    assert!(
+        !move_object_for_test(
+            runner.state_mut(),
+            ZoneMoveRequest::effect(chosen, Zone::Graveyard, chosen),
+            &mut events,
+        ),
+        "the remembered departure must terminate, not park on a replacement choice"
+    );
     engine::game::triggers::process_triggers(runner.state_mut(), &events);
     assert_eq!(
         runner.state().stack.len(),
@@ -387,9 +397,10 @@ fn etb_choice_chain_trigger() -> TriggerDefinition {
 /// CR 603.6a/c + CR 607.2d + CR 608.2c: the discriminating REAL-trigger-path
 /// test for the remembered-object reader. The choice chain is the EXECUTE of an
 /// actual `ChangesZone` ETB trigger: the host moves hand → battlefield through
-/// `move_to_zone`, the trigger is collected by `process_triggers`, and its
-/// resolution parks on the real `WaitingFor::ChooseObjectsSelection` prompt
-/// answered with `GameAction::SelectTargets`.
+/// the production zone-change pipeline (`move_object_for_test`), the trigger is
+/// collected by `process_triggers`, and its resolution parks on the real
+/// `WaitingFor::ChooseObjectsSelection` prompt answered with
+/// `GameAction::SelectTargets`.
 ///
 /// `Effect::RememberCard` writes `ChosenAttribute::Card` to the LIVE source,
 /// NOT to the resolution chain's latched `TriggerSourceContext`, so the pump's
@@ -419,7 +430,14 @@ fn real_etb_trigger_chain_excludes_the_just_remembered_creature() {
     // Real zone change + real trigger scan: the host's own ETB trigger lands on
     // the stack with its latched `TriggerSourceContext`.
     let mut events = Vec::new();
-    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Battlefield, &mut events);
+    assert!(
+        !move_object_for_test(
+            runner.state_mut(),
+            ZoneMoveRequest::effect(host, Zone::Battlefield, host),
+            &mut events,
+        ),
+        "the hand -> battlefield entry must terminate, not park on a replacement choice"
+    );
     engine::game::triggers::process_triggers(runner.state_mut(), &events);
     assert!(
         runner

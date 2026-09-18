@@ -10,7 +10,8 @@
 //!   * the other exiled card's ability is NOT granted (multi-authority
 //!     negative), and
 //!   * after the remembered card leaves exile the grant drops (CR 400.7 — the
-//!     zone-agnostic reader would still identify the id).
+//!     moved card is a new object at the same storage id, so the stored
+//!     incarnation pin no longer names it).
 //!
 //! The stale fixture is deliberately never consulted (1-C5): this test parses
 //! the verbatim Oracle text and builds its own objects. Fixture regeneration is
@@ -22,7 +23,8 @@ use super::koh_face_stealer_grants::pinned_chosen_card_source;
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::layers::evaluate_layers;
-use engine::game::zones::{create_object, move_to_zone};
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
+use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, Effect, ManaContribution,
@@ -150,9 +152,10 @@ fn resolve_remember_card(state: &mut GameState, koh: ObjectId, card: ObjectId) {
 }
 
 /// CR 607.2a + CR 607.2d + CR 400.7: the parsed statics grant ONLY the
-/// remembered exiled card's abilities, and the composed exile pin drops the
-/// grant once that card leaves exile (even though the zone-agnostic reader still
-/// identifies its id).
+/// remembered exiled card's abilities, and the grant drops once that card leaves
+/// exile — the composed exile pin stops matching AND the moved card is a new
+/// object at the same storage id, so the stored incarnation pin no longer names
+/// it.
 #[test]
 fn koh_pin_grants_only_the_remembered_exiled_card_and_drops_when_it_leaves_exile() {
     let parsed = parse_koh();
@@ -198,17 +201,26 @@ fn koh_pin_grants_only_the_remembered_exiled_card_and_drops_when_it_leaves_exile
          multi-authority negative)"
     );
 
-    // CR 400.7: the remembered card leaves exile. The composed CR 607.2a pin
-    // stops matching, so the grant drops; the still-exiled Red card is not the
-    // remembered object and must not be granted either.
+    // CR 400.7: the remembered card leaves exile through the production
+    // zone-change pipeline (a new object at the same storage id). The composed
+    // CR 607.2a pin stops matching, so the grant drops; the still-exiled Red
+    // card is not the remembered object and must not be granted either.
     let mut events = Vec::new();
-    move_to_zone(&mut state, remembered, Zone::Graveyard, &mut events);
+    assert!(
+        !move_object_for_test(
+            &mut state,
+            ZoneMoveRequest::effect(remembered, Zone::Graveyard, remembered),
+            &mut events,
+        ),
+        "the exile -> graveyard move must terminate, not park on a replacement choice"
+    );
     evaluate_layers(&mut state);
     assert!(
         koh_granted_mana_colors(&state, koh).is_empty(),
         "once the remembered card leaves exile the exile pin must drop the grant \
-         (the zone-agnostic reader would otherwise still identify its CR 400.7 id); \
-         the other exiled card must NOT inherit the grant"
+         (CR 400.7: the moved card is a new object at the same storage id, so the \
+         stored incarnation pin no longer names it); the other exiled card must \
+         NOT inherit the grant"
     );
     assert_eq!(
         state.objects[&other].zone,
