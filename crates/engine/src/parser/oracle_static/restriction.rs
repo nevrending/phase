@@ -2118,9 +2118,18 @@ pub(crate) fn try_parse_graveyard_cast_permission(
 
     // Parse optional alt-cost rider from the text after "from your graveyard".
     let rider_kind = parse_alt_cost_rider(trailing).ok().map(|(_, k)| k);
-    let graveyard_destination_replacement = parse_exile_spell_cast_this_way_rider(trailing)
-        .is_ok()
-        .then_some(Zone::Exile);
+    // CR 614.1a + CR 607.1: peel the linked stack-exit destination sentence
+    // BEFORE the additional-cost rider parse below — that parser's tail
+    // validation rejects the still-present sentence, so the split must run
+    // first. A sentence present but not in the modeled trailing-suffix position
+    // (`Unmodeled`) declines the whole permission rather than silently dropping
+    // the replacement clause.
+    let (trailing, destination_rider) = split_exile_spell_cast_this_way_rider(trailing);
+    let graveyard_destination_replacement = match destination_rider {
+        GraveyardDestinationRider::Absent => None,
+        GraveyardDestinationRider::Parsed(zone) => Some(zone),
+        GraveyardDestinationRider::Unmodeled => return None,
+    };
     // CR 601.2f: Optional "by <cost> in addition to (paying )?(their|its) other
     // costs" ADDITIONAL non-mana cost rider (Festival of Embers pay-life; Dragon
     // Man, Reformed Robot discard). Recognized before the permission-condition
@@ -2189,6 +2198,45 @@ enum AdditionalCostRider {
     /// honest coverage gap (Unimplemented) instead of a strictly-more-permissive
     /// misparse (CR 601.2f: an additional cost that must be paid).
     Unmodeled,
+}
+
+/// CR 614.1a + CR 607.1: outcome of the trailing "If a spell cast this way
+/// would be put into your graveyard, exile it instead." linked replacement
+/// sentence. A plain `Option<Zone>` conflates "no sentence" with "sentence
+/// present but not in the modeled trailing-suffix position"; the latter must
+/// DECLINE the permission rather than silently drop a CR 614.1a clause.
+enum GraveyardDestinationRider {
+    /// No destination sentence is present (Lurrus/Karador/Conduit).
+    Absent,
+    /// Sentence present as the trailing suffix, lowered to the destination.
+    Parsed(Zone),
+    /// Sentence present but not the trailing suffix — the caller must DECLINE
+    /// the whole permission so the dropped replacement stays an honest coverage
+    /// gap instead of a permission that resolves the spell to its graveyard.
+    Unmodeled,
+}
+
+/// CR 614.1a + CR 607.1: Split the trailing "If a spell cast this way would be
+/// put into your graveyard, exile it instead." sentence off a rider text run,
+/// returning the text before the sentence and the destination outcome. The
+/// sentence is recognized only when the shared all-consuming
+/// [`parse_exile_spell_cast_this_way_rider`] recognizes it as the trailing
+/// suffix; any rider text following the sentence makes the outcome `Unmodeled`
+/// (the clause cannot be dropped silently).
+fn split_exile_spell_cast_this_way_rider(trailing: &str) -> (&str, GraveyardDestinationRider) {
+    const MARKER: &str =
+        "if a spell cast this way would be put into your graveyard, exile it instead";
+    let Ok((_, (before, _after))) = nom_primitives::split_once_on(trailing, MARKER) else {
+        return (trailing, GraveyardDestinationRider::Absent);
+    };
+    // allow-noncombinator: structural offset back to the rider start so the
+    // all-consuming recognizer sees the full clause (mirrors :2269).
+    let rider = &trailing[before.len()..];
+    if parse_exile_spell_cast_this_way_rider(rider.trim_end()).is_ok() {
+        (before, GraveyardDestinationRider::Parsed(Zone::Exile))
+    } else {
+        (before, GraveyardDestinationRider::Unmodeled)
+    }
 }
 
 /// CR 601.2f: Parse a trailing ADDITIONAL-cost rider on a cast-from-zone

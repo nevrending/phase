@@ -13065,6 +13065,57 @@ impl AbilityCost {
         }
     }
 
+    /// True when this cost tree contains an [`AbilityCost::Unimplemented`] leaf
+    /// at any depth. Containment is a property of the cost tree itself, so the
+    /// authority lives here rather than in a parser or coverage walker.
+    ///
+    /// Strict superset of the two former coverage-private `Composite`-only
+    /// copies: it also recurses `OneOf` and `PerCounter`. `EffectCost` is
+    /// deliberately NOT walked — it carries an `Effect`, not a cost, and the
+    /// coverage path this serves classifies its embedded effect separately.
+    /// Mirrors `StaticCondition::contains_unrecognized`.
+    ///
+    /// Exhaustive match — no wildcard arm — so a newly added variant must be
+    /// explicitly classified rather than silently reporting `false`.
+    pub(crate) fn contains_unimplemented(&self) -> bool {
+        match self {
+            AbilityCost::Unimplemented { .. } => true,
+            AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                costs.iter().any(AbilityCost::contains_unimplemented)
+            }
+            AbilityCost::PerCounter { base, .. } => base.contains_unimplemented(),
+            AbilityCost::EffectCost { .. } => false,
+            AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::GetPlayerCounters { .. } => false,
+        }
+    }
+
     /// CR 601.2h + CR 602.2b: a disjunctive cost leg is resolved to the chosen
     /// instruction and the total cost is then paid as a whole.
     ///
@@ -37036,6 +37087,57 @@ mod tests {
                 ],
             })
         );
+    }
+
+    /// `AbilityCost::contains_unimplemented` is the single containment
+    /// authority: it recurses `Composite`/`OneOf`/`PerCounter`, answers `true`
+    /// for a bare `Unimplemented`, and deliberately does not walk an
+    /// `EffectCost`'s embedded effect.
+    #[test]
+    fn contains_unimplemented_recurses_composition_and_skips_effect_cost() {
+        assert!(AbilityCost::Unimplemented {
+            description: "frobnicate".to_string(),
+        }
+        .contains_unimplemented());
+        assert!(AbilityCost::Composite {
+            costs: vec![
+                pay_life_cost(2),
+                AbilityCost::Unimplemented {
+                    description: "sacrifice a thing".to_string(),
+                },
+            ],
+        }
+        .contains_unimplemented());
+        assert!(AbilityCost::OneOf {
+            costs: vec![
+                generic_mana_cost(2),
+                AbilityCost::Composite {
+                    costs: vec![AbilityCost::Unimplemented {
+                        description: "frobnicate".to_string(),
+                    }],
+                },
+            ],
+        }
+        .contains_unimplemented());
+        assert!(AbilityCost::PerCounter {
+            counter: CounterType::Age,
+            target: TargetFilter::SelfRef,
+            base: Box::new(AbilityCost::Unimplemented {
+                description: "frobnicate".to_string(),
+            }),
+        }
+        .contains_unimplemented());
+        assert!(!AbilityCost::Composite {
+            costs: vec![pay_life_cost(2), generic_mana_cost(1)],
+        }
+        .contains_unimplemented());
+        assert!(!AbilityCost::EffectCost {
+            effect: Box::new(Effect::Unimplemented {
+                name: "static_structure".to_string(),
+                description: None,
+            }),
+        }
+        .contains_unimplemented());
     }
 }
 
