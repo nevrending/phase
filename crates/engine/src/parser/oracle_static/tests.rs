@@ -15911,6 +15911,35 @@ fn graveyard_cast_permission_destination_not_suffix_declines() {
     );
 }
 
+/// CR 607.1 + CR 614.1a: an enters-with-counter rider followed by the
+/// destination sentence is an unmodeled ordering — the enters-with peel must
+/// NOT commit on the counter clause and silently drop the sentence; the whole
+/// permission declines. The trailing-finality shape is the reach-guard.
+#[test]
+fn graveyard_cast_permission_destination_after_enters_with_rider_declines() {
+    let modeled = "You may cast this card from your graveyard by paying 3 life in addition to paying its other costs. If you cast a spell this way, that creature enters with a finality counter on it.";
+    let def = try_parse_graveyard_cast_permission(modeled, &modeled.to_lowercase())
+        .expect("reach-guard: the trailing enters-with rider must still emit the permission");
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                enters_with_counter: Some(CounterType::Finality),
+                ..
+            }
+        ),
+        "reach-guard: the modeled enters-with ordering must keep its counter, got {:?}",
+        def.mode
+    );
+
+    let hostile = "You may cast this card from your graveyard by paying 3 life in addition to paying its other costs. If you cast a spell this way, that creature enters with a finality counter on it. If a spell cast this way would be put into your graveyard, exile it instead.";
+    assert!(
+        try_parse_graveyard_cast_permission(hostile, &hostile.to_lowercase()).is_none(),
+        "an enters-with rider before the destination sentence must decline the \
+         permission, not drop the CR 614.1a replacement"
+    );
+}
+
 /// Issue #1524 — Serpent's Soul-Jar: persistent exile pool without "this turn".
 #[test]
 fn exile_cast_permission_soul_jar_persistent_creature_pool() {

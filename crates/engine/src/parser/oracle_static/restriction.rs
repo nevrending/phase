@@ -2317,10 +2317,22 @@ fn split_cast_this_way_enters_rider(
             // `text.len() - rest.len()` idiom) so the shared recognizer sees the
             // full "if you cast … this way, …" clause including its marker.
             let rider = &trailing[before.len()..];
-            if let Some((counter_type, _rest)) =
+            if let Some((counter_type, rest)) =
                 super::oracle_effect::parse_cast_this_way_enters_with_counter(rider)
             {
-                return (before, Some(counter_type));
+                // CR 614.1a + CR 607.1: commit the peel only when the recognizer
+                // consumed the WHOLE rider. Text after the counter clause (a
+                // destination sentence, a type-grant tail, or a future rider)
+                // must stay in the trailing run so the downstream classifiers
+                // see it and decline rather than silently dropping it.
+                let after = rest.trim_start();
+                let after = opt(tag::<_, _, OracleError<'_>>("."))
+                    .parse(after)
+                    .map(|(after, _)| after)
+                    .unwrap_or(after);
+                if after.trim().is_empty() {
+                    return (before, Some(counter_type));
+                }
             }
         }
     }
