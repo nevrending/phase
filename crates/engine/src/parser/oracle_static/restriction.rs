@@ -2114,7 +2114,12 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     // trailing text so the enters-with counter rides the permission and the
     // remaining riders (extra_cost, condition) parse against the counter-free
     // tail (Noctis, Prince of Lucis; Leonardo, Sewer Samurai — both finality).
-    let (trailing, enters_with_counter) = split_cast_this_way_enters_rider(trailing);
+    let (trailing, enters_rider) = split_cast_this_way_enters_rider(trailing);
+    let enters_with_counter = match enters_rider {
+        EntersWithRider::Absent => None,
+        EntersWithRider::Parsed(counter) => Some(counter),
+        EntersWithRider::Unmodeled => return None,
+    };
 
     // Parse optional alt-cost rider from the text after "from your graveyard".
     let rider_kind = parse_alt_cost_rider(trailing).ok().map(|(_, k)| k);
@@ -2299,9 +2304,23 @@ fn parse_cast_permission_additional_cost_rider(trailing: &str) -> AdditionalCost
 /// the shared `oracle_effect::parse_cast_this_way_enters_with_counter` authority
 /// so the effect path (Osteomancer/Tomb) and the static path recognize the same
 /// shapes. Returns `(trailing, None)` unchanged when no such rider is present.
-fn split_cast_this_way_enters_rider(
-    trailing: &str,
-) -> (&str, Option<crate::types::counter::CounterType>) {
+/// CR 607.1 + CR 122.1 + CR 614.1c: outcome of the linked "if you cast a spell
+/// this way, that <permanent> enters with a [counter] counter on it" rider.
+/// A plain `Option<CounterType>` conflates "no rider present" with "rider
+/// present but not fully consumed" — the latter must DECLINE the permission
+/// rather than silently dropping whatever follows the counter clause (a CR
+/// 614.1a destination sentence, a type-grant tail, or a future rider).
+enum EntersWithRider {
+    /// No enters-with rider is present.
+    Absent,
+    /// Rider present and fully consumed as the trailing suffix.
+    Parsed(crate::types::counter::CounterType),
+    /// Rider present but the recognizer left text after the counter clause —
+    /// the caller must DECLINE so nothing is silently dropped.
+    Unmodeled,
+}
+
+fn split_cast_this_way_enters_rider(trailing: &str) -> (&str, EntersWithRider) {
     // "if you do" covers the self-granting shape (Undead Sprinter's "If you do,
     // this creature enters with a +1/+1 counter on it"). The slice is
     // recognizer-guarded below (only commits when the shared enters-with-counter
@@ -2323,20 +2342,20 @@ fn split_cast_this_way_enters_rider(
                 // CR 614.1a + CR 607.1: commit the peel only when the recognizer
                 // consumed the WHOLE rider. Text after the counter clause (a
                 // destination sentence, a type-grant tail, or a future rider)
-                // must stay in the trailing run so the downstream classifiers
-                // see it and decline rather than silently dropping it.
+                // must decline the permission rather than being silently dropped.
                 let after = rest.trim_start();
                 let after = opt(tag::<_, _, OracleError<'_>>("."))
                     .parse(after)
                     .map(|(after, _)| after)
                     .unwrap_or(after);
                 if after.trim().is_empty() {
-                    return (before, Some(counter_type));
+                    return (before, EntersWithRider::Parsed(counter_type));
                 }
+                return (trailing, EntersWithRider::Unmodeled);
             }
         }
     }
-    (trailing, None)
+    (trailing, EntersWithRider::Absent)
 }
 
 /// CR 108.3 + CR 109.5: Attach a "cards you own" ownership constraint to a typed
@@ -2767,7 +2786,12 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
     // its "by removing three counters … in addition to paying their other costs"
     // tail is NOT a finality rider, stays in the remainder, and trips the
     // strict Persistent empty-tail check → declines (clean gap, not a misparse).
-    let (after_source, enters_with_counter) = split_cast_this_way_enters_rider(after_source);
+    let (after_source, enters_rider) = split_cast_this_way_enters_rider(after_source);
+    let enters_with_counter = match enters_rider {
+        EntersWithRider::Absent => None,
+        EntersWithRider::Parsed(counter) => Some(counter),
+        EntersWithRider::Unmodeled => return None,
+    };
 
     // CR 108.3 + CR 109.5: apply the "cards you own" ownership constraint to the
     // affected filter — the card's owner must be the permission's controller.
