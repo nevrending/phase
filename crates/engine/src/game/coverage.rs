@@ -5688,15 +5688,15 @@ fn append_effect_static_carrier_items(
     });
 }
 
-/// Build `ParsedItem` nodes for ability costs, only emitting items for
-/// composite or unimplemented costs (simple costs are not interesting).
+/// Build `ParsedItem` nodes for ability costs, emitting an unsupported item
+/// for every unpayable leaf in the tree.
+///
+/// Traversal delegates to [`AbilityCost::for_each_cost_node`], the single
+/// cost-tree shape authority, so this collector, the gap collector below, and
+/// `AbilityCost::contains_unimplemented` all see the same subtrees — including
+/// `OneOf`/`PerCounter` nesting and an `EffectCost`'s embedded effect.
 fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
-    match cost {
-        AbilityCost::Composite { costs } => {
-            for nested in costs {
-                build_cost_item(nested, items);
-            }
-        }
+    cost.for_each_cost_node(&mut |node| match node {
         AbilityCost::Unimplemented { description } => {
             items.push(ParsedItem {
                 category: ParseCategory::Cost,
@@ -5707,8 +5707,20 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
                 children: vec![],
             });
         }
+        AbilityCost::EffectCost { effect } => {
+            if let Effect::Unimplemented { name, description } = effect.as_ref() {
+                items.push(ParsedItem {
+                    category: ParseCategory::Cost,
+                    label: name.clone(),
+                    source_text: description.clone().or_else(|| Some(name.clone())),
+                    supported: false,
+                    details: vec![],
+                    children: vec![],
+                });
+            }
+        }
         _ => {}
-    }
+    });
 }
 
 /// Build `ParsedItem` nodes for additional costs (kicker, etc.).
@@ -8537,21 +8549,29 @@ fn collect_source_texts(items: &[ParsedItem], out: &mut Vec<String>) {
     }
 }
 
+/// Collect the coverage gaps for an ability cost tree. Traversal delegates to
+/// [`AbilityCost::for_each_cost_node`], the single cost-tree shape authority,
+/// so the gap set cannot miss a subtree the containment predicate sees
+/// (`OneOf`/`PerCounter` nesting, and an `EffectCost` whose embedded effect is
+/// `Unimplemented`).
 fn collect_ability_cost_missing_parts(cost: &AbilityCost, missing: &mut Vec<String>) {
-    match cost {
-        AbilityCost::Composite { costs } => {
-            for nested_cost in costs {
-                collect_ability_cost_missing_parts(nested_cost, missing);
-            }
-        }
+    cost.for_each_cost_node(&mut |node| match node {
         AbilityCost::Unimplemented { description } => {
             let label = format!("Cost:{description}");
             if !missing.contains(&label) {
                 missing.push(label);
             }
         }
+        AbilityCost::EffectCost { effect } => {
+            if let Effect::Unimplemented { name, .. } = effect.as_ref() {
+                let label = format!("Cost:{name}");
+                if !missing.contains(&label) {
+                    missing.push(label);
+                }
+            }
+        }
         _ => {}
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -19327,7 +19347,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 ],
             }),
         ));
-        assert!(!additional_cost_has_unimplemented(
+        assert!(additional_cost_has_unimplemented(
             &AdditionalCost::Required(AbilityCost::EffectCost {
                 effect: Box::new(Effect::Unimplemented {
                     name: "static_structure".to_string(),
@@ -19335,5 +19355,86 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 }),
             }),
         ));
+    }
+
+    /// The parsed-item and gap collectors must traverse the same complete
+    /// cost-tree shape as `AbilityCost::contains_unimplemented` — including
+    /// `OneOf`/`PerCounter` nesting and an `EffectCost`'s embedded effect —
+    /// otherwise a nested unpayable cost is reported as supported.
+    #[test]
+    fn cost_tree_collectors_traverse_oneof_percounter_and_effect_cost() {
+        use crate::types::ability::{QuantityExpr, TargetFilter};
+        use crate::types::counter::CounterType;
+
+        let unimplemented = || AbilityCost::Unimplemented {
+            description: "frobnicate".to_string(),
+        };
+        let one_of = || AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+                unimplemented(),
+            ],
+        };
+        let per_counter = || AbilityCost::PerCounter {
+            counter: CounterType::Age,
+            target: TargetFilter::SelfRef,
+            base: Box::new(unimplemented()),
+        };
+        let effect_cost = || AbilityCost::EffectCost {
+            effect: Box::new(Effect::Unimplemented {
+                name: "unparsed_verb_arguments".to_string(),
+                description: None,
+            }),
+        };
+        let modeled = || AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+                AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::generic(1),
+                },
+            ],
+        };
+
+        for (cost, expected_gap, expected_label) in [
+            (one_of(), "Cost:frobnicate", "frobnicate"),
+            (per_counter(), "Cost:frobnicate", "frobnicate"),
+            (
+                effect_cost(),
+                "Cost:unparsed_verb_arguments",
+                "unparsed_verb_arguments",
+            ),
+        ] {
+            let mut missing = Vec::new();
+            collect_ability_cost_missing_parts(&cost, &mut missing);
+            assert_eq!(
+                missing,
+                vec![expected_gap.to_string()],
+                "gap collector must see the nested unpayable leaf in {cost:?}"
+            );
+
+            let mut items = Vec::new();
+            build_cost_item(&cost, &mut items);
+            assert!(
+                items
+                    .iter()
+                    .any(|item| !item.supported && item.label == expected_label),
+                "parsed-item collector must emit the unsupported leaf for {cost:?}"
+            );
+        }
+
+        // Reach-guard: a fully modeled disjunction collects nothing.
+        let mut missing = Vec::new();
+        collect_ability_cost_missing_parts(&modeled(), &mut missing);
+        assert!(missing.is_empty(), "modeled tree must collect no gap");
+        let mut items = Vec::new();
+        build_cost_item(&modeled(), &mut items);
+        assert!(
+            items.is_empty(),
+            "modeled tree must emit no unsupported item"
+        );
     }
 }

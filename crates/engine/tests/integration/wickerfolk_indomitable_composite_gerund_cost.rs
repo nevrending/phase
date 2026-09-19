@@ -13,6 +13,7 @@
 
 use engine::game::casting::{can_cast_object_now, spell_objects_available_to_cast};
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::game::EngineError;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -137,8 +138,9 @@ fn wickerfolk_graveyard_cast_requires_controlling_the_sacrifice() {
 /// permanent is refused and the cast does not commit for free.
 ///
 /// The fluent `SpellCast` driver announces and pays inside one loop, so this
-/// test steps the pipeline manually through `GameRunner::act` and moves the
-/// fodder at the exposed `WaitingFor::PayCost` seam — the only point in the
+/// test steps the pipeline manually through `GameRunner::act` and removes the
+/// fodder at the exposed `WaitingFor::PayCost` seam via the production
+/// `zone_pipeline::move_object_for_test` entry point — the only point in the
 /// scenario harness where a post-declaration removal is representable.
 #[test]
 fn wickerfolk_graveyard_cast_rejected_when_declared_fodder_leaves_before_payment() {
@@ -171,9 +173,21 @@ fn wickerfolk_graveyard_cast_rejected_when_declared_fodder_leaves_before_payment
     }
 
     // Hostile timing: the fodder leaves the battlefield after the cast was
-    // declared but before the sacrifice is paid.
+    // declared but before the sacrifice is paid. Route the move through the
+    // production zone-change pipeline (CR 614.1a replacement handling + the
+    // delivery tail) rather than a raw zone write, so the fixture proves the
+    // hostile event the engine actually produces. A vanilla fodder has no
+    // applicable replacement, so the move must not pause for a choice.
     let mut events = Vec::new();
-    engine::game::zones::move_to_zone(runner.state_mut(), fodder, Zone::Graveyard, &mut events);
+    let paused_for_choice = move_object_for_test(
+        runner.state_mut(),
+        ZoneMoveRequest::effect(fodder, Zone::Graveyard, fodder),
+        &mut events,
+    );
+    assert!(
+        !paused_for_choice,
+        "reach-guard: a vanilla fodder move must not pause for a replacement choice"
+    );
 
     let rejected = runner
         .act(GameAction::SelectCards {
