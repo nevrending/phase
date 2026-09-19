@@ -2294,16 +2294,6 @@ fn parse_cast_permission_additional_cost_rider(trailing: &str) -> AdditionalCost
     }
 }
 
-/// CR 607.1 + CR 122.1 + CR 614.1c: Peel the linked "if you cast a spell this
-/// way, that <permanent> enters with a [counter] counter on it" rider off a
-/// trailing text run, returning `(text-before-rider, Some(counter))`. The rider
-/// is a CR 607.1 linked-permission back-reference — the enters-with counter
-/// rides the cast permission (carried on the static's `enters_with_counter`
-/// field), so it must be split off before the extra_cost / condition / pool
-/// parsers consume the trailing text. Delegates the counter-subject grammar to
-/// the shared `oracle_effect::parse_cast_this_way_enters_with_counter` authority
-/// so the effect path (Osteomancer/Tomb) and the static path recognize the same
-/// shapes. Returns `(trailing, None)` unchanged when no such rider is present.
 /// CR 607.1 + CR 122.1 + CR 614.1c: outcome of the linked "if you cast a spell
 /// this way, that <permanent> enters with a [counter] counter on it" rider.
 /// A plain `Option<CounterType>` conflates "no rider present" with "rider
@@ -2320,6 +2310,17 @@ enum EntersWithRider {
     Unmodeled,
 }
 
+/// CR 607.1 + CR 122.1 + CR 614.1c: Peel the linked "if you cast a spell this
+/// way, that <permanent> enters with a [counter] counter on it" rider off a
+/// trailing text run. The rider is a CR 607.1 linked-permission back-reference —
+/// the enters-with counter rides the cast permission (carried on the static's
+/// `enters_with_counter` field), so it must be split off before the extra_cost /
+/// condition / pool parsers consume the trailing text. Delegates the
+/// counter-subject grammar to the shared
+/// `oracle_effect::parse_cast_this_way_enters_with_counter` authority so the
+/// effect path (Osteomancer/Tomb) and the static path recognize the same
+/// shapes. Returns `(trailing, EntersWithRider::Absent)` unchanged when no such
+/// rider is present.
 fn split_cast_this_way_enters_rider(trailing: &str) -> (&str, EntersWithRider) {
     // "if you do" covers the self-granting shape (Undead Sprinter's "If you do,
     // this creature enters with a +1/+1 counter on it"). The slice is
@@ -2351,6 +2352,13 @@ fn split_cast_this_way_enters_rider(trailing: &str) -> (&str, EntersWithRider) {
                 if after.trim().is_empty() {
                     return (before, EntersWithRider::Parsed(counter_type));
                 }
+                // KNOWN LIMITATION (deferred, latent — 0 corpus cards): a
+                // document-level decline here can still be reclaimed by the
+                // Priority-8 replacement fallback (the enters-with clause reads
+                // as a self-ETB `PutCounter` replacement), so full dispatch of
+                // these permutations is not yet an honest `static_structure`
+                // gap. Making the decline terminal belongs to the document
+                // dispatch, outside this parser's seam.
                 return (trailing, EntersWithRider::Unmodeled);
             }
         }

@@ -15915,6 +15915,13 @@ fn graveyard_cast_permission_destination_not_suffix_declines() {
 /// destination sentence is an unmodeled ordering — the enters-with peel must
 /// NOT commit on the counter clause and silently drop the sentence; the whole
 /// permission declines. The trailing-finality shape is the reach-guard.
+///
+/// The assertions are helper-level (`try_parse_graveyard_cast_permission`): the
+/// document-level dispatch can still reclaim a declined line via the Priority-8
+/// replacement fallback (the enters-with clause reads as a self-ETB
+/// `PutCounter` replacement), so full dispatch of these permutations is not yet
+/// an honest `static_structure` gap. Making the decline terminal belongs to the
+/// document dispatch and is deferred; 0 corpus cards carry this ordering.
 #[test]
 fn graveyard_cast_permission_destination_after_enters_with_rider_declines() {
     let modeled = "You may cast this card from your graveyard by paying 3 life in addition to paying its other costs. If you cast a spell this way, that creature enters with a finality counter on it.";
