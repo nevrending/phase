@@ -2405,13 +2405,13 @@ fn split_cast_this_way_enters_rider(trailing: &str) -> (&str, EntersWithRider) {
                 if after.trim().is_empty() {
                     return (before, EntersWithRider::Parsed(counter_type));
                 }
-                // KNOWN LIMITATION (deferred, latent — 0 corpus cards): a
-                // document-level decline here can still be reclaimed by the
-                // Priority-8 replacement fallback (the enters-with clause reads
-                // as a self-ETB `PutCounter` replacement), so full dispatch of
-                // these permutations is not yet an honest `static_structure`
-                // gap. Making the decline terminal belongs to the document
-                // dispatch, outside this parser's seam.
+                // A document-level decline here is terminal for the
+                // graveyard-permission class: the document dispatcher emits the
+                // typed `static_structure` residual for a declined line headed by
+                // this class's lead (`is_graveyard_cast_permission_lead`) instead
+                // of letting the Priority-8 replacement fallback reclaim it. The
+                // exile-permission caller (`try_parse_exile_cast_permission`)
+                // still relies on its own strict remainder check.
                 return (trailing, EntersWithRider::Unmodeled);
             }
         }
