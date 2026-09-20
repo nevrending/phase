@@ -322,6 +322,7 @@ mod fewer_than_existential_threshold;
 mod field_marshal_soldier_anthem_first_strike;
 mod field_of_ruin_search;
 mod fight_for_the_throne_monarch_gated_on_commander;
+mod fin_sidequest_turn_history_conditions;
 mod finality_counter_death_to_exile;
 mod fire_lord_ozai_each_opponent_library_top;
 mod fireball_x_cost_surcharge_timing;

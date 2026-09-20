@@ -3198,6 +3198,122 @@ fn anaphor_self_rewrite_does_not_fire_without_named_clause() {
     }
 }
 
+/// CR 608.2c + CR 701.3a (FIN Sidequest class — Sidequest: Play Blitzball):
+/// in "transform ~, then attach it to <host>", the previous clause named the
+/// SOURCE via `~` (a `SelfRef` Transform), so the following bare-pronoun
+/// ATTACHMENT operand must rebind to the source. The DEFAULT `ParseContext` is
+/// the discriminating context: `typed_trigger_subject` is false there, so only
+/// the new `attach_anaphor_after_self_ref_transform` admission can fire. The
+/// fully-named host (`target`) keeps its own binding.
+#[test]
+fn attach_anaphor_rebinds_to_self_after_named_transform_clause() {
+    let mut ctx = ParseContext::default();
+    let def = parse_effect_chain_with_context(
+        "transform ~, then attach it to a creature you control.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    // Clause 1: the named source.
+    match &*def.effect {
+        Effect::Transform {
+            target: TargetFilter::SelfRef,
+            ..
+        } => {}
+        other => panic!("expected clause 1 = Transform SelfRef, got {other:?}"),
+    }
+    // Clause 2 (sub_ability): the attachment rebinds; the host is untouched.
+    let sub = def.sub_ability.as_ref().expect("attach sub_ability");
+    match &*sub.effect {
+        Effect::Attach { attachment, target } => {
+            assert_eq!(
+                *attachment,
+                TargetFilter::SelfRef,
+                "the bare-pronoun attachment names the transformed source"
+            );
+            match target {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "host must stay 'a creature you control', got {:?}",
+                        tf.type_filters
+                    );
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected typed host filter, got {other:?}"),
+            }
+        }
+        other => panic!("expected clause 2 = Attach, got {other:?}"),
+    }
+}
+
+/// Same clause shape under a typed trigger subject: the attachment operand route
+/// (`imperative::parse_attachment_anaphor`) parses through a DEFAULT
+/// `ParseContext`, so it yields `ParentTarget` before the chunk-loop gate
+/// regardless of the real subject — the pre-existing `typed_trigger_subject`
+/// disjunct and the new admission both land on `SelfRef`.
+#[test]
+fn attach_anaphor_rebinds_to_self_under_typed_trigger_subject() {
+    let mut ctx = cat_subject_ctx();
+    let def = parse_effect_chain_with_context(
+        "transform ~, then attach it to a creature you control.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    match &*def.effect {
+        Effect::Transform {
+            target: TargetFilter::SelfRef,
+            ..
+        } => {}
+        other => panic!("expected clause 1 = Transform SelfRef, got {other:?}"),
+    }
+    let sub = def.sub_ability.as_ref().expect("attach sub_ability");
+    match &*sub.effect {
+        Effect::Attach { attachment, target } => {
+            assert_eq!(
+                *attachment,
+                TargetFilter::SelfRef,
+                "typed-subject context must still bind the attachment to the source"
+            );
+            assert!(
+                matches!(target, TargetFilter::Typed(_)),
+                "host must stay a typed creature filter, got {target:?}"
+            );
+        }
+        other => panic!("expected clause 2 = Attach, got {other:?}"),
+    }
+}
+
+/// Negative sibling (the Soul Seizer encoding): when the previous clause
+/// transformed a CHOSEN target (`Transform{ParentTarget}` — "transform it"),
+/// the following bare "it" is genuinely ambiguous, so the gate must NOT fire and
+/// the attachment operand keeps its default `ParentTarget` — never `SelfRef`.
+#[test]
+fn attach_anaphor_keeps_parent_target_when_prior_clause_is_not_self_ref_transform() {
+    let mut ctx = ParseContext::default();
+    let def = parse_effect_chain_with_context(
+        "transform it, then attach it to a creature you control.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    match &*def.effect {
+        Effect::Transform {
+            target: TargetFilter::ParentTarget,
+            ..
+        } => {}
+        other => panic!("expected clause 1 = Transform ParentTarget, got {other:?}"),
+    }
+    let sub = def.sub_ability.as_ref().expect("attach sub_ability");
+    match &*sub.effect {
+        Effect::Attach {
+            attachment: TargetFilter::ParentTarget,
+            ..
+        } => {}
+        other => {
+            panic!("attachment must stay ParentTarget for a non-SelfRef antecedent, got {other:?}")
+        }
+    }
+}
+
 #[test]
 fn counter_suffix_body_fixed_count_regression() {
     // Regression: the fixed-count path still parses after the dynamic arm

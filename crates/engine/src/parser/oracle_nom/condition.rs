@@ -637,9 +637,47 @@ fn parse_subject_was_dealt_excess_damage_this_turn(
     ))
 }
 
-/// CR 603.4 + CR 120.3: "you were/an opponent was dealt N or more damage this
-/// turn" — Boarded Window and Phoenix Chick-style end-step intervening-if
-/// predicates. Any-source damage to the matching player set.
+/// CR 120.2a / CR 120.2b: the shared damage-class axis of this module's
+/// `" or more <kind> damage this turn"` surfaces — `"noncombat "` →
+/// `NoncombatOnly`, `"combat "` → `CombatOnly`, and the empty match (no
+/// qualifier) → `Any`.
+///
+/// The three combinators in this module that carry the qualifier delegate here:
+/// the player-subject threshold
+/// (`parse_player_was_dealt_damage_threshold_this_turn`), the source-subject
+/// threshold (`parse_source_damage_threshold_this_turn`), and the self-dealt
+/// direction (`parse_source_dealt_damage_this_turn`). Adding a future damage
+/// class (or a spelling variant) therefore happens exactly once here. The
+/// noun-bearing grammars elsewhere (`oracle_quantity`, `oracle_trigger`,
+/// `oracle_target`) recognize their own damage-kind adjectives and are not
+/// callers.
+fn parse_damage_kind_qualifier(input: &str) -> OracleResult<'_, DamageKindFilter> {
+    alt((
+        value(DamageKindFilter::NoncombatOnly, tag("noncombat ")),
+        value(DamageKindFilter::CombatOnly, tag("combat ")),
+        value(DamageKindFilter::Any, tag("")),
+    ))
+    .parse(input)
+}
+
+/// CR 603.4 + CR 120.1 + CR 120.2a / CR 120.2b + CR 120.3 + CR 608.2i:
+/// "you were / a player was / an opponent was dealt N or more
+/// [combat|noncombat] damage this turn" — Boarded Window and Phoenix Chick-style
+/// end-step intervening-if predicates, plus Sidequest: Play Blitzball ("a player
+/// was dealt 6 or more combat damage this turn"). Any-source damage to the
+/// matching player set.
+///
+/// Three independent nom axes compose the class:
+/// - recipient subject (`you` / `a player` / `an opponent`) → `target`,
+/// - threshold N (`parse_number`),
+/// - optional combat/noncombat qualifier → `DamageKindFilter`, via the shared
+///   `parse_damage_kind_qualifier` authority (CR 120.2a / CR 120.2b) this
+///   module's qualifier-bearing damage-history surfaces delegate to.
+///
+/// CR 120.1: the tally reads the "dealt to" direction (recipient), and CR 120.3
+/// makes the damage's result the amount actually dealt/marked per record.
+/// CR 608.2i: the predicate looks back over the turn's damage records rather than
+/// the live game state, so it answers correctly after a recipient has left.
 fn parse_player_was_dealt_damage_threshold_this_turn(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
@@ -663,7 +701,12 @@ fn parse_player_was_dealt_damage_threshold_this_turn(
     .parse(input)?;
     let (rest, _) = tag(passive_verb).parse(rest)?;
     let (rest, amount) = parse_number(rest)?;
-    let (rest, _) = tag(" or more damage this turn").parse(rest)?;
+    let (rest, _) = tag(" or more ").parse(rest)?;
+    // CR 120.2a / CR 120.2b: the shared damage-class axis — delegated to
+    // `parse_damage_kind_qualifier`, the authority this module's
+    // qualifier-bearing damage-history surfaces use to name their damage class.
+    let (rest, damage_kind) = parse_damage_kind_qualifier(rest)?;
+    let (rest, _) = tag("damage this turn").parse(rest)?;
     Ok((
         rest,
         make_quantity_ge(
@@ -672,7 +715,7 @@ fn parse_player_was_dealt_damage_threshold_this_turn(
                 target: Box::new(target),
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
-                damage_kind: DamageKindFilter::Any,
+                damage_kind,
 
                 channel: DamageChannel::Total,
             },
@@ -737,13 +780,15 @@ fn parse_player_dealt_combat_damage_by_source_this_turn(
 }
 
 fn parse_source_dealt_damage_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    // CR 120.1 + CR 120.2a + CR 603.4: "<source-anaphor> dealt [combat] damage to a
-    // player/opponent/creature this turn" — the *dealing* direction (source = the
-    // ability's own permanent). This covers player, opponent, AND creature (incl.
-    // "another creature") targets. "it" is the source anaphor for triggered-ability
-    // intervening-ifs (Wave of Rats' dies trigger); "~"/"this creature"/"this
-    // permanent" cover the self-ref forms. The optional "combat" qualifier narrows
-    // the damage channel (CR 120.2a) so combat-only history is required.
+    // CR 120.1 + CR 120.2a + CR 120.2b + CR 603.4: "<source-anaphor> dealt
+    // [combat|noncombat] damage to a player/opponent/creature this turn" — the
+    // *dealing* direction (source = the ability's own permanent). This covers
+    // player, opponent, AND creature (incl. "another creature") targets. "it" is
+    // the source anaphor for triggered-ability intervening-ifs (Wave of Rats'
+    // dies trigger); "~"/"this creature"/"this permanent" cover the self-ref
+    // forms. The optional combat/noncombat qualifier is delegated to the shared
+    // `parse_damage_kind_qualifier` (CR 120.2a / CR 120.2b), so both damage
+    // classes are recognized here rather than "combat" alone.
     let (rest, _) = alt((
         tag("~"),
         tag("this creature"),
@@ -752,7 +797,12 @@ fn parse_source_dealt_damage_this_turn(input: &str) -> OracleResult<'_, StaticCo
     ))
     .parse(input)?;
     let (rest, _) = tag(" dealt ").parse(rest)?;
-    let (rest, combat) = opt(tag("combat ")).parse(rest)?;
+    // CR 120.2a / CR 120.2b: the shared damage-class axis — see
+    // `parse_damage_kind_qualifier`. Delegating (rather than the former
+    // `opt(tag("combat "))`) newly accepts the "noncombat" spelling on the
+    // dealing direction; the no-qualifier and "combat" forms parse identically
+    // (the helper's `Any` fallback is the empty-tag arm).
+    let (rest, damage_kind) = parse_damage_kind_qualifier(rest)?;
     let (rest, _) = tag("damage to ").parse(rest)?;
     let (rest, target) = alt((
         value(
@@ -774,11 +824,6 @@ fn parse_source_dealt_damage_this_turn(input: &str) -> OracleResult<'_, StaticCo
     ))
     .parse(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
-    let damage_kind = if combat.is_some() {
-        DamageKindFilter::CombatOnly
-    } else {
-        DamageKindFilter::Any
-    };
     Ok((
         rest,
         make_quantity_ge(
@@ -6673,7 +6718,8 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
 ///   source (no grouping),
 /// - controller (`you` / `an opponent`) matched against the CR 608.2i look-back
 ///   source snapshot at damage time, not the live object,
-/// - optional `"noncombat"` / `"combat"` qualifier → `DamageKindFilter`.
+/// - optional `"noncombat"` / `"combat"` qualifier → `DamageKindFilter`, via the
+///   shared `parse_damage_kind_qualifier` authority (CR 120.2a / CR 120.2b),
 ///
 /// The untyped singular form "a source you controlled dealt N or more damage
 /// this turn" (article, no color, no qualifier) is preserved unchanged
@@ -6695,13 +6741,9 @@ fn parse_source_damage_threshold_this_turn(input: &str) -> OracleResult<'_, Stat
     let (rest, _) = tag(" dealt ").parse(rest)?;
     let (rest, amount) = parse_number(rest)?;
     let (rest, _) = tag(" or more ").parse(rest)?;
-    // Axis 4: optional combat/noncombat qualifier (CR 120.2a / CR 120.2b).
-    let (rest, damage_kind) = alt((
-        value(DamageKindFilter::NoncombatOnly, tag("noncombat ")),
-        value(DamageKindFilter::CombatOnly, tag("combat ")),
-        value(DamageKindFilter::Any, tag("")),
-    ))
-    .parse(rest)?;
+    // Axis 4: optional combat/noncombat qualifier — delegated to the shared
+    // damage-class authority (`parse_damage_kind_qualifier`, CR 120.2a / CR 120.2b).
+    let (rest, damage_kind) = parse_damage_kind_qualifier(rest)?;
     let (rest, _) = tag("damage this turn").parse(rest)?;
 
     let mut source = TypedFilter::default().controller(controller);
@@ -7088,7 +7130,7 @@ fn parse_played_a_land_this_turn(input: &str) -> OracleResult<'_, StaticConditio
 fn parse_creature_died_this_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_creatures_died_this_turn_threshold,
-        parse_died_under_your_control_this_turn,
+        parse_died_under_control_this_turn,
         // "a creature died this turn" (Morbid) → zone-change count >= 1
         value(
             make_quantity_ge(creatures_died_this_turn_ref(), 1),
@@ -7121,7 +7163,7 @@ fn parse_creatures_died_this_turn_threshold(input: &str) -> OracleResult<'_, Sta
 
 /// "a <type-phrase> died this turn" — the filtered Morbid gate without a
 /// controller scope (Undead Sprinter's "a non-Zombie creature died this turn").
-/// Mirrors `parse_died_under_your_control_this_turn` but terminates on the bare
+/// Mirrors `parse_died_under_control_this_turn` but terminates on the bare
 /// " died this turn" and injects NO controller constraint. Rejects a non-empty
 /// type-phrase leftover / `TargetFilter::Any` so only a fully-typed subject claims
 /// the arm — a name-negation ("a creature not named X died this turn", Ebondeath)
@@ -8047,10 +8089,42 @@ fn parse_sacrificed_this_turn_tail(input: &str) -> OracleResult<'_, StaticCondit
     ))
 }
 
-fn parse_died_under_your_control_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+/// CR 603.4 + CR 700.4 + CR 608.2h + CR 109.4 / CR 109.5: "a <type-phrase>
+/// died under <possessor> control this turn" — the dies-history intervening-if
+/// predicate (Sidequest: Hunt the Mark's "a creature died under an opponent's
+/// control this turn"; the "under your control" surface on 19 other cards).
+///
+/// The possessor is a typed `ControllerRef` axis:
+/// - "your control" → `ControllerRef::You` — the ability source's controller,
+/// - "an opponent's control" → `ControllerRef::Opponent` — an opponent of that
+///   controller (CR 102.2 in a two-player game; CR 102.3 for the multiplayer
+///   team reading), covering the apostrophe spellings via the shared
+///   `parse_opponent_possessive` combinator.
+///
+/// CR 700.4: "dies" means battlefield → graveyard, so the predicate counts this
+/// turn's `ZoneChangeCountThisTurn { Battlefield → Graveyard }` records matching
+/// the type phrase. CR 608.2h: the possession test reads the dead permanent's
+/// LAST-KNOWN controller (`ZoneChangeRecord.controller`) rather than the live
+/// object — the same LKI argument `parse_entered_this_turn_under_opponent_control`
+/// documents for battlefield entry.
+fn parse_died_under_control_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_article(input)?;
-    let (rest, type_text) = take_until(" died under your control this turn").parse(rest)?;
-    let (rest, _) = tag(" died under your control this turn").parse(rest)?;
+    let (rest, type_text) = take_until(" died under ").parse(rest)?;
+    let (rest, _) = tag(" died under ").parse(rest)?;
+    // CR 109.4 + CR 109.5: the possessor is a typed controller reference —
+    // "your control" = the ability source's controller, "an opponent's control"
+    // = any opponent of that controller. `parse_opponent_possessive` is the
+    // module's shared opponent-possessive combinator (also used by the
+    // life-total and zone-count grammars) and covers the apostrophe spellings.
+    let (rest, possessor) = alt((
+        value(ControllerRef::You, tag("your control")),
+        value(
+            ControllerRef::Opponent,
+            preceded(parse_opponent_possessive, tag("control")),
+        ),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
     let (filter, leftover) = parse_type_phrase_folding(type_text);
     if !leftover.trim().is_empty() || filter == TargetFilter::Any {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -8064,7 +8138,7 @@ fn parse_died_under_your_control_this_turn(input: &str) -> OracleResult<'_, Stat
             QuantityRef::ZoneChangeCountThisTurn {
                 from: Some(Zone::Battlefield),
                 to: Some(Zone::Graveyard),
-                filter: inject_controller_you(filter),
+                filter: inject_controller(filter, possessor),
             },
             1,
         ),
@@ -19420,21 +19494,111 @@ mod tests {
                 comparator,
                 rhs,
             } => {
-                assert!(matches!(
-                    lhs,
+                match lhs {
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ZoneChangeCountThisTurn {
-                            from: Some(Zone::Battlefield),
-                            to: Some(Zone::Graveyard),
-                            ..
-                        }
+                        qty:
+                            QuantityRef::ZoneChangeCountThisTurn {
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Graveyard),
+                                filter,
+                            },
+                    } => {
+                        let TargetFilter::Typed(tf) = filter else {
+                            panic!("expected typed creature filter, got {filter:?}");
+                        };
+                        assert!(
+                            tf.type_filters.contains(&TypeFilter::Creature),
+                            "expected the Creature type filter, got {:?}",
+                            tf.type_filters
+                        );
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        // CR 109.4: the presence injection rides on the shared
+                        // `inject_controller` authority both possessor arms use.
+                        assert!(
+                            tf.properties.iter().any(|prop| matches!(
+                                prop,
+                                FilterProp::InZone {
+                                    zone: Zone::Battlefield
+                                }
+                            )),
+                            "expected battlefield presence, got {:?}",
+                            tf.properties
+                        );
                     }
-                ));
+                    other => panic!("expected ZoneChangeCountThisTurn, got {other:?}"),
+                }
                 assert_eq!(comparator, Comparator::GE);
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
             }
             _ => panic!("expected QuantityComparison, got {c:?}"),
         }
+    }
+
+    /// CR 109.4 + CR 109.5 + CR 608.2h: "a creature died under an opponent's
+    /// control this turn" (Sidequest: Hunt the Mark) — the possessor axis reads
+    /// the same typed `ControllerRef` the "your control" surface does. Reverting
+    /// the combinator to the fixed " died under your control this turn" suffix
+    /// makes this input an `Err`.
+    #[test]
+    fn test_creature_died_under_opponent_control() {
+        let (rest, c) =
+            parse_inner_condition("a creature died under an opponent's control this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneChangeCountThisTurn {
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Graveyard),
+                                filter,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected typed creature filter, got {filter:?}");
+                };
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "expected the Creature type filter, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("expected opponent-control zone-change count, got {other:?}"),
+        }
+    }
+
+    /// CR 603.4 boundary contract for the dies-history possessor axis: the
+    /// combinator must stop exactly at the clause boundary (the caller's
+    /// `try_extract_intervening` requires the remainder to start with `,` or
+    /// `.`), must leave any text AFTER " this turn" as `rest` — the leftover
+    /// rejection runs on the TYPE PHRASE, not on the trailing remainder — and
+    /// must hard-fail when the " this turn" suffix is absent.
+    #[test]
+    fn test_died_under_control_boundaries() {
+        // Hunt the Mark's real clause boundary: the trailing ", create a
+        // Treasure token." is returned untouched for the caller.
+        let (rest, _) = parse_inner_condition(
+            "a creature died under an opponent's control this turn, create a Treasure token.",
+        )
+        .unwrap();
+        assert_eq!(rest, ", create a Treasure token.");
+
+        let (rest, _) =
+            parse_inner_condition("a creature died under your control this turn and more").unwrap();
+        assert_eq!(
+            rest, " and more",
+            "text after the suffix belongs to the caller, not the leftover check"
+        );
+
+        assert!(
+            parse_inner_condition("a creature died under your control").is_err(),
+            "a missing ' this turn' suffix must not be claimed by any arm"
+        );
     }
 
     #[test]
@@ -19559,6 +19723,78 @@ mod tests {
         }
     }
 
+    /// CR 120.1 + CR 120.2a + CR 603.4: "a player was dealt 6 or more combat
+    /// damage this turn" — the damage-kind axis on the player-subject threshold
+    /// (Sidequest: Play Blitzball). Reverting the axis to the single literal
+    /// `tag(" or more damage this turn")` makes this input fail to parse at all,
+    /// while the two sibling rows above pin `Any` for the unqualified family.
+    #[test]
+    fn test_player_was_dealt_combat_damage_threshold_this_turn() {
+        let (rest, c) =
+            parse_inner_condition("a player was dealt 6 or more combat damage this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::DamageDealtThisTurn {
+                                source,
+                                target,
+                                aggregate: AggregateFunction::Sum,
+                                group_by: None,
+                                damage_kind: DamageKindFilter::CombatOnly,
+
+                                channel: DamageChannel::Total,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 6 },
+            } => {
+                assert_eq!(*source, TargetFilter::Any);
+                assert_eq!(*target, TargetFilter::Player);
+            }
+            other => panic!("expected player combat-damage threshold quantity, got {other:?}"),
+        }
+    }
+
+    /// Hostile sibling for the axis: `noncombat` is its own value, and it must
+    /// compose with the opponent recipient subject rather than collapsing to
+    /// `CombatOnly` (the arm immediately preceding it) or `Any` (the empty tag).
+    #[test]
+    fn test_opponent_was_dealt_noncombat_damage_threshold_this_turn() {
+        let (rest, c) =
+            parse_inner_condition("an opponent was dealt 4 or more noncombat damage this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::DamageDealtThisTurn {
+                                source,
+                                target,
+                                aggregate: AggregateFunction::Sum,
+                                group_by: None,
+                                damage_kind: DamageKindFilter::NoncombatOnly,
+
+                                channel: DamageChannel::Total,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            } => {
+                assert_eq!(*source, TargetFilter::Any);
+                let TargetFilter::Typed(typed) = *target else {
+                    panic!("expected typed opponent target filter");
+                };
+                assert_eq!(typed.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("expected opponent noncombat-damage threshold quantity, got {other:?}"),
+        }
+    }
+
     /// CR 120.1 + CR 603.4: "~ dealt damage to another creature this turn" — the
     /// dealing-direction *creature* target (Wolverine, Best There Is). "another"
     /// excludes the source (FilterProp::Another); no "combat" -> DamageKindFilter::Any.
@@ -19625,6 +19861,41 @@ mod tests {
                 assert_eq!(*target, TargetFilter::Player);
             }
             other => panic!("expected SelfRef->Player CombatOnly GE 1, got {other:?}"),
+        }
+    }
+
+    /// CR 120.1 + CR 120.2b + CR 603.4: the source-subject *dealing* direction with
+    /// the `noncombat` qualifier — newly accepted once the site delegates to the
+    /// shared `parse_damage_kind_qualifier` (it previously recognized only
+    /// `combat `, via `opt(tag("combat "))`). Reverting the delegation makes this
+    /// input fail to parse. The two rows above pin the unchanged no-qualifier
+    /// (`Any`) and `combat` (`CombatOnly`) forms.
+    #[test]
+    fn parse_source_dealt_noncombat_damage_this_turn() {
+        let (rest, c) =
+            parse_inner_condition("~ dealt noncombat damage to a player this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::DamageDealtThisTurn {
+                                source,
+                                target,
+                                aggregate: AggregateFunction::Sum,
+                                group_by: None,
+                                damage_kind: DamageKindFilter::NoncombatOnly,
+                                channel: DamageChannel::Total,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(*source, TargetFilter::SelfRef);
+                assert_eq!(*target, TargetFilter::Player);
+            }
+            other => panic!("expected SelfRef->Player NoncombatOnly GE 1, got {other:?}"),
         }
     }
 
