@@ -32,30 +32,41 @@
 //! `issue_605_calming_licid.rs` (attach `attachment`/`attached_to`/host
 //! `attachments` assertions).
 //!
+//! Runtime rows cover both halves of the class: the U4 per-recipient damage
+//! threshold (R7–R9) and the U5 resolution-time described attach host (R10–R13),
+//! including the moved-card cascade (R13, Stonehewer Giant).
+//!
 //! Negative rows are paired with positive reach-guards: every "does not fire" /
 //! "not attached" assertion is preceded by a proof that the path was reached
 //! (the damage happened, the victim died, the parse produced the typed clause).
 
+use engine::game::combat::AttackTarget;
+use engine::game::effects::attach;
 use engine::game::game_object::AttachTarget;
 use engine::game::printed_cards::snapshot_object_face;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use engine::types::ability::{
-    AggregateFunction, Comparator, ControllerRef, DamageChannel, DamageKindFilter, Effect,
-    FilterProp, QuantityExpr, QuantityRef, TargetFilter, TargetRef, TriggerCondition,
-    TriggerConstraint, TypeFilter,
+    AggregateFunction, Comparator, ControllerRef, DamageChannel, DamageGroupKey, DamageKindFilter,
+    Effect, EffectKind, FilterProp, QuantityExpr, QuantityRef, TargetFilter, TargetRef,
+    TriggerCondition, TriggerConstraint, TypeFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::card_type::CoreType;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use super::rules::run_combat;
+
+/// The third seat of the multiplayer rows (`P0`/`P1` are the scenario
+/// constants; the engine exports no `P2`).
+const P2: PlayerId = PlayerId(2);
 
 // ---------------------------------------------------------------------------
 // Verbatim Oracle text (Scryfall + the local export, 2026-09-20)
@@ -119,8 +130,11 @@ fn play_blitzball_parse_carries_combat_condition_and_self_ref_attach() {
                 qty: QuantityRef::DamageDealtThisTurn {
                     source: Box::new(TargetFilter::Any),
                     target: Box::new(TargetFilter::Player),
-                    aggregate: AggregateFunction::Sum,
-                    group_by: None,
+                    // CR 603.4: "a player" names a SET, so the threshold is read
+                    // per recipient (`Max` over `Some(Target)`) — never as a sum
+                    // across recipients.
+                    aggregate: AggregateFunction::Max,
+                    group_by: Some(DamageGroupKey::Target),
                     damage_kind: DamageKindFilter::CombatOnly,
                     channel: DamageChannel::Total,
                 },
@@ -129,8 +143,8 @@ fn play_blitzball_parse_carries_combat_condition_and_self_ref_attach() {
             rhs: QuantityExpr::Fixed { value: 6 },
         }),
         "CR 603.4 + CR 120.2a: the intervening-if must be the combat-only \
-         player-damage threshold (\"a player was dealt 6 or more combat damage \
-         this turn\")"
+         per-recipient player-damage threshold (\"a player was dealt 6 or more \
+         combat damage this turn\")"
     );
     assert_eq!(
         trigger.constraint,
@@ -301,21 +315,56 @@ fn hunt_the_mark_parse_carries_opponent_control_dies_condition() {
 // Runtime harness
 // ---------------------------------------------------------------------------
 
+/// One interjected instant cast: `player` casts `spell` at `target` the first
+/// time they receive priority, then the ordinary loop resumes. Mirrors
+/// `rules.rs`'s `PriorityResponse` interjection (99-120).
+struct PriorityResponse {
+    player: PlayerId,
+    spell: ObjectId,
+    target: TargetRef,
+}
+
 /// Drive interactive windows until `stop` holds. `targets` answers
 /// declared-target prompts in FIFO order (CR 601.2c declaration order for
 /// spells, CR 603.3d for triggers — the engine surfaces the trigger variant as
-/// `WaitingFor::TriggerTargetSelection`). The one turn-based declaration the
-/// helper answers is the active player's attack declaration: CR 508.1a lets the
-/// active player choose which creatures, IF ANY, attack, so a row whose board
-/// holds a legal attacker but whose scenario is a no-attack row submits the
-/// empty declaration explicitly — a deliberate play, not a silent skip (the
-/// prompt only surfaces when a legal attacker exists, and attacking rows drive
-/// through `run_combat` instead). Every other window panics: a silent skip must
+/// `WaitingFor::TriggerTargetSelection`); `attach_choices` answers a parked
+/// resolution-time Attach host choice (`WaitingFor::EffectZoneChoice` with
+/// `effect_kind: EffectKind::Attach`, CR 115.1d + CR 608.2d) in the same FIFO
+/// order. The one turn-based declaration the helper answers is the active
+/// player's attack declaration: CR 508.1a lets the active player choose which
+/// creatures, IF ANY, attack, so a row whose board holds a legal attacker but
+/// whose scenario is a no-attack row submits the empty declaration explicitly —
+/// a deliberate play, not a silent skip (the prompt only surfaces when a legal
+/// attacker exists, and attacking rows declare through `declare_attackers`
+/// after stopping on the prompt). Every other window panics: a silent skip must
 /// never make a negative row pass vacuously. Mirrors `rules.rs`'s drive loop
 /// (98) and the `drain_order_triggers_with_identity` idiom.
 fn drive(
     runner: &mut GameRunner,
     targets: &mut Vec<TargetRef>,
+    attach_choices: &mut Vec<ObjectId>,
+    stop: impl FnMut(&GameRunner) -> bool,
+) {
+    drive_with_optional_response(runner, targets, attach_choices, None, stop);
+}
+
+/// [`drive`] with one interjected instant cast (R11: the host leaves while the
+/// trigger is on the stack).
+fn drive_with_priority_response(
+    runner: &mut GameRunner,
+    targets: &mut Vec<TargetRef>,
+    attach_choices: &mut Vec<ObjectId>,
+    response: PriorityResponse,
+    stop: impl FnMut(&GameRunner) -> bool,
+) {
+    drive_with_optional_response(runner, targets, attach_choices, Some(response), stop);
+}
+
+fn drive_with_optional_response(
+    runner: &mut GameRunner,
+    targets: &mut Vec<TargetRef>,
+    attach_choices: &mut Vec<ObjectId>,
+    mut response: Option<PriorityResponse>,
     mut stop: impl FnMut(&GameRunner) -> bool,
 ) {
     for _ in 0..120 {
@@ -337,13 +386,45 @@ fn drive(
                     target: Some(targets.remove(0)),
                 }
             }
+            // CR 115.1d + CR 608.2d: a resolution-time described attach host is
+            // not a target — it arrives as an `EffectZoneChoice`. Answering it
+            // from the explicit FIFO (never by skipping) is what makes a
+            // wrong-kind/wrong-timing firing observable.
+            WaitingFor::EffectZoneChoice {
+                cards,
+                effect_kind: EffectKind::Attach,
+                ..
+            } => {
+                if attach_choices.is_empty() {
+                    panic!(
+                        "drive: an Attach EffectZoneChoice arrived with an empty choice queue: \
+                         cards={cards:?}"
+                    );
+                }
+                GameAction::SelectCards {
+                    cards: vec![attach_choices.remove(0)],
+                }
+            }
             // CR 508.1a: "chooses which creatures that they control, if any,
             // will attack" — no-attack rows declare that choice here.
             WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
                 attacks: vec![],
                 bands: vec![],
             },
-            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::Priority { player } => {
+                match response.take_if(|queued| queued.player == player) {
+                    Some(PriorityResponse { spell, target, .. }) => {
+                        targets.push(target);
+                        GameAction::CastSpell {
+                            object_id: spell,
+                            card_id: runner.state().objects[&spell].card_id,
+                            targets: vec![],
+                            payment_mode: CastPaymentMode::Auto,
+                        }
+                    }
+                    None => GameAction::PassPriority,
+                }
+            }
             other => panic!("drive: unexpected window {other:?}"),
         };
         runner
@@ -450,17 +531,19 @@ fn play_blitzball_six_combat_damage_transforms_and_attaches_to_host() {
     // Resolve the beginning-of-combat Pump trigger (full card text, so this
     // prompt exists and must be answered — unanswered it would strand the run).
     let mut pump_targets = vec![TargetRef::Object(attacker)];
-    drive(&mut runner, &mut pump_targets, |r| {
+    drive(&mut runner, &mut pump_targets, &mut Vec::new(), |r| {
         at_phase_quiet(r, Phase::BeginCombat)
     });
 
     run_combat(&mut runner, vec![attacker], vec![]);
 
-    // End of combat: the trigger fires (condition true) and announces its
-    // attach host. The attacker is the sole creature and thus the only legal
-    // host; the same object also receives the pump, so this queue is one slot.
-    let mut attach_targets = vec![TargetRef::Object(attacker)];
-    drive(&mut runner, &mut attach_targets, |r| {
+    // End of combat: the trigger fires (condition true) and its described host
+    // ("a creature you control") is a RESOLUTION-time choice (CR 115.1d +
+    // CR 608.2d) — the attacker is the sole legal host, so it is auto-bound and
+    // NO declared-target prompt appears. The empty target queue is
+    // load-bearing: a stack-time host regression would panic here rather than
+    // pass silently.
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
         at_phase_quiet(r, Phase::EndCombat)
     });
 
@@ -503,14 +586,13 @@ fn play_blitzball_five_combat_damage_does_not_fire() {
     let (mut runner, sidequest, attacker) = blitzball_board(3);
 
     let mut pump_targets = vec![TargetRef::Object(attacker)];
-    drive(&mut runner, &mut pump_targets, |r| {
+    drive(&mut runner, &mut pump_targets, &mut Vec::new(), |r| {
         at_phase_quiet(r, Phase::BeginCombat)
     });
 
     run_combat(&mut runner, vec![attacker], vec![]);
 
-    let mut attach_targets = vec![TargetRef::Object(attacker)];
-    drive(&mut runner, &mut attach_targets, |r| {
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
         at_phase_quiet(r, Phase::EndCombat)
     });
 
@@ -572,13 +654,14 @@ fn play_blitzball_six_noncombat_damage_does_not_fire() {
 
     // The 1/1 host is a legal target for the beginning-of-combat pump, so that
     // prompt exists and is answered first; the host then stays home (the drive
-    // submits the empty attack declaration at CR 508.1a). The SECOND queued
-    // target is the attach host: with the correct combat-only condition no
-    // trigger fires and it goes unused, but a wrong-kind (`Any`) regression
-    // would fire the trigger, demand its stack-time attach host, and resolve a
-    // transform onto that host — failing the `!transformed` assertion below.
-    let mut targets = vec![TargetRef::Object(host), TargetRef::Object(host)];
-    drive(&mut runner, &mut targets, |r| {
+    // submits the empty attack declaration at CR 508.1a). No attach choice is
+    // queued: with the correct combat-only condition no trigger fires, while a
+    // wrong-kind (`Any`) regression would fire the trigger and open its
+    // resolution-time host prompt as an `EffectZoneChoice` — which the drive
+    // answers only from the (empty) choice queue and therefore panics on,
+    // making the regression observable rather than vacuous.
+    let mut targets = vec![TargetRef::Object(host)];
+    drive(&mut runner, &mut targets, &mut Vec::new(), |r| {
         at_phase_quiet(r, Phase::EndCombat)
     });
 
@@ -658,7 +741,9 @@ fn hunt_the_mark_opponent_creature_death_creates_treasure() {
     let (mut runner, sidequest, victim) = hunt_the_mark_board(P1, 0);
 
     let mut targets = Vec::new();
-    drive(&mut runner, &mut targets, |r| at_phase_quiet(r, Phase::End));
+    drive(&mut runner, &mut targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::End)
+    });
 
     // Reach-guard: the death actually happened under P1's control.
     assert_eq!(
@@ -695,7 +780,9 @@ fn hunt_the_mark_own_creature_death_creates_no_treasure() {
     let (mut runner, _sidequest, victim) = hunt_the_mark_board(P0, 0);
 
     let mut targets = Vec::new();
-    drive(&mut runner, &mut targets, |r| at_phase_quiet(r, Phase::End));
+    drive(&mut runner, &mut targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::End)
+    });
 
     assert_eq!(
         runner.state().objects[&victim].zone,
@@ -719,7 +806,9 @@ fn hunt_the_mark_three_treasures_transform_preservation_row() {
     let (mut runner, sidequest, victim) = hunt_the_mark_board(P1, 2);
 
     let mut targets = Vec::new();
-    drive(&mut runner, &mut targets, |r| at_phase_quiet(r, Phase::End));
+    drive(&mut runner, &mut targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::End)
+    });
 
     assert_eq!(
         runner.state().objects[&victim].zone,
@@ -736,5 +825,832 @@ fn hunt_the_mark_three_treasures_transform_preservation_row() {
         runner.state().objects[&sidequest].transformed,
         "PRESERVATION row (not revert-failing by itself): the conditional \
          transform fires at 3 Treasures"
+    );
+}
+
+// ===========================================================================
+// R7–R9 — U4: the existential subjects read PER RECIPIENT (CR 603.4)
+// ===========================================================================
+
+/// Three-player Play Blitzball board: the enchantment, `attacker_count`
+/// attackers of power `attacker_power`, a non-attacking pump target, and a donor
+/// Equipment back face on P1. Returns (runner, sidequest, attackers, pump_target).
+///
+/// The pump target is deliberately NOT one of the attackers: the card's own
+/// beginning-of-combat ability must be answered by a creature that does not
+/// attack, so each attacker's combat damage stays exactly `attacker_power`.
+fn blitzball_multiplayer_board(
+    attacker_power: i32,
+    attacker_count: usize,
+) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 71);
+    scenario.at_phase(Phase::PreCombatMain);
+    let sidequest = scenario
+        .add_enchantment_from_oracle(P0, "Sidequest: Play Blitzball", PLAY_BLITZBALL)
+        .id();
+    let attackers: Vec<ObjectId> = (0..attacker_count)
+        .map(|_| {
+            scenario
+                .add_creature(P0, "Grizzly Bears", attacker_power, 3)
+                .id()
+        })
+        .collect();
+    let pump_target = scenario.add_creature(P0, "Homebody", 1, 1).id();
+    let donor = scenario
+        .add_artifact_from_oracle(P1, "World Champion, Celestial Weapon", WORLD_CHAMPION)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let mut runner = scenario.build();
+    inject_back_face(&mut runner, sidequest, donor);
+    (runner, sidequest, attackers, pump_target)
+}
+
+/// CR 603.4: 3 combat damage to P1 + 3 to P2 → NEITHER recipient reached 6, so
+/// the existential "a player was dealt 6 or more combat damage this turn" does
+/// NOT fire. Under the ungrouped `Sum` reading (the revert) 3+3 = 6 would fire,
+/// transform, and open its resolution-time host prompt — which this row's drive
+/// answers only from the empty choice queue and therefore panics on.
+#[test]
+fn play_blitzball_split_damage_across_two_recipients_does_not_fire() {
+    let (mut runner, sidequest, attackers, pump_target) = blitzball_multiplayer_board(3, 2);
+
+    // The card's own beginning-of-combat pump, answered by the non-attacker.
+    let mut pump_targets = vec![TargetRef::Object(pump_target)];
+    drive(&mut runner, &mut pump_targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::BeginCombat)
+    });
+
+    // CR 508.1a: stop ON the attack declaration, then declare the two attackers
+    // at DIFFERENT players.
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
+        matches!(r.state().waiting_for, WaitingFor::DeclareAttackers { .. })
+    });
+    runner
+        .declare_attackers(&[
+            (attackers[0], AttackTarget::Player(P1)),
+            (attackers[1], AttackTarget::Player(P2)),
+        ])
+        .expect("both attackers declare against different players");
+
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::EndCombat)
+    });
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        17,
+        "reach-guard: the first attacker connected (3 to P1)"
+    );
+    assert_eq!(
+        runner.state().players[P2.0 as usize].life,
+        17,
+        "reach-guard: the second attacker connected (3 to P2)"
+    );
+    assert_eq!(runner.state().phase, Phase::EndCombat);
+    assert!(
+        !runner.state().objects[&sidequest].transformed,
+        "neither recipient was dealt 6 — the existential reading must not sum \
+         across recipients"
+    );
+}
+
+/// CR 603.4: 3+3 combat damage to the SAME recipient → that recipient's
+/// per-recipient sum is 6 → the existential threshold fires. The two attackers
+/// and the pump target all survive, so the host choice parks at resolution and
+/// the row answers it from the explicit FIFO (CR 115.1d + CR 608.2d).
+#[test]
+fn play_blitzball_damage_to_one_recipient_fires() {
+    let (mut runner, sidequest, attackers, pump_target) = blitzball_multiplayer_board(3, 2);
+
+    let mut pump_targets = vec![TargetRef::Object(pump_target)];
+    drive(&mut runner, &mut pump_targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::BeginCombat)
+    });
+
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
+        matches!(r.state().waiting_for, WaitingFor::DeclareAttackers { .. })
+    });
+    runner
+        .declare_attackers(&[
+            (attackers[0], AttackTarget::Player(P1)),
+            (attackers[1], AttackTarget::Player(P1)),
+        ])
+        .expect("both attackers declare against the same player");
+
+    let mut attach_choices = vec![pump_target];
+    drive(&mut runner, &mut Vec::new(), &mut attach_choices, |r| {
+        at_phase_quiet(r, Phase::EndCombat)
+    });
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        14,
+        "reach-guard: 3+3 landed on ONE seat (a positive control that the \
+         per-recipient partition is not a no-records-match bug)"
+    );
+    assert!(
+        runner.state().objects[&sidequest].transformed,
+        "one recipient was dealt 3+3 = 6 → the existential threshold fires"
+    );
+    assert_eq!(
+        runner.state().objects[&sidequest].attached_to,
+        Some(AttachTarget::Object(pump_target)),
+        "the chosen host receives the attachment"
+    );
+    assert!(
+        runner.state().objects[&pump_target]
+            .attachments
+            .contains(&sidequest),
+        "the chosen host must list the Sidequest among its attachments"
+    );
+}
+
+/// CR 120.2a + CR 603.4: 3 COMBAT + 3 NONCOMBAT damage to the same player. The
+/// per-recipient sum is 6, but the combat-only qualifier keeps only the 3 combat
+/// damage → the condition is false. A legal attach host stays on the battlefield
+/// so a wrong-kind (`Any`) regression would fire the trigger and open its
+/// resolution-time host prompt, which the drive panics on (empty choice queue).
+#[test]
+fn play_blitzball_mixed_kinds_on_one_recipient_do_not_fire() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sidequest = scenario
+        .add_enchantment_from_oracle(P0, "Sidequest: Play Blitzball", PLAY_BLITZBALL)
+        .id();
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 3, 3).id();
+    // A legal host that never attacks (the pump's target and the attach host).
+    let host = scenario.add_creature(P0, "Homebody", 1, 1).id();
+    let donor = scenario
+        .add_artifact_from_oracle(P1, "World Champion, Celestial Weapon", WORLD_CHAMPION)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Three Damage", true, "Deal 3 damage to target player.")
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    inject_back_face(&mut runner, sidequest, donor);
+
+    // 3 NONCOMBAT damage to P1 before combat.
+    runner.cast(bolt).target_player(P1).resolve();
+
+    // Pump on the non-attacker, then the 3-power attacker deals 3 COMBAT damage.
+    let mut pump_targets = vec![TargetRef::Object(host)];
+    drive(&mut runner, &mut pump_targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::BeginCombat)
+    });
+    run_combat(&mut runner, vec![attacker], vec![]);
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::EndCombat)
+    });
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        14,
+        "reach-guard: 3 noncombat + 3 combat damage WAS dealt — only the kind \
+         split excludes the combat-qualified threshold"
+    );
+    assert_eq!(runner.state().phase, Phase::EndCombat);
+    assert_eq!(
+        runner.state().objects[&host].zone,
+        Zone::Battlefield,
+        "reach-guard: a legal attach host exists at the end-of-combat window, so \
+         a wrong-kind firing would be observable rather than vacuous"
+    );
+    assert!(
+        !runner.state().objects[&sidequest].transformed,
+        "CR 120.2a: only 3 of the 6 damage was combat — the combat-qualified \
+         per-recipient threshold is not met"
+    );
+}
+
+/// CR 120.1 + CR 120.3 + CR 120.9 (MED): 6 COMBAT damage dealt to an opponent's
+/// CREATURE must NOT satisfy "a player was dealt 6 or more combat damage this
+/// turn" — CR 120.1 lists players and permanents as distinct damage recipients.
+/// The player-only recipient filter refuses object recipients, so the Blitzball
+/// condition stays false.
+///
+/// NOTE on discrimination: Blitzball's printed subject is "a player", whose
+/// `TargetFilter::Player` arm was already object-refusing before this fix, so
+/// this row pins the class behavior (and the blocked-combat setup) rather than
+/// the `an opponent` arm's repair — the revert-failing evidence for that arm is
+/// the resolver unit row (`player_damage_threshold_refuses_object_recipients`)
+/// and the two synthetic opponent-subject rows below.
+#[test]
+fn play_blitzball_creature_damage_does_not_satisfy_the_player_threshold() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sidequest = scenario
+        .add_enchantment_from_oracle(P0, "Sidequest: Play Blitzball", PLAY_BLITZBALL)
+        .id();
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 4, 4).id();
+    // A 0/6 blocker: it absorbs the pumped attacker's whole 6 damage and deals
+    // nothing back, so no damage reaches a player.
+    let blocker = scenario.add_creature(P1, "Test Wall", 0, 6).id();
+    let donor = scenario
+        .add_artifact_from_oracle(P1, "World Champion, Celestial Weapon", WORLD_CHAMPION)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let mut runner = scenario.build();
+    inject_back_face(&mut runner, sidequest, donor);
+
+    let mut pump_targets = vec![TargetRef::Object(attacker)];
+    drive(&mut runner, &mut pump_targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::BeginCombat)
+    });
+    // The pumped 6/4 attacker is blocked by the 0/6 wall.
+    run_combat(&mut runner, vec![attacker], vec![(blocker, attacker)]);
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::EndCombat)
+    });
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        20,
+        "reach-guard: no combat damage reached the player (the blocker absorbed it)"
+    );
+    assert_eq!(
+        runner.state().objects[&blocker].zone,
+        Zone::Graveyard,
+        "reach-guard: the blocker took 6 lethal damage and died"
+    );
+    assert_eq!(
+        runner.state().objects[&attacker].zone,
+        Zone::Battlefield,
+        "reach-guard: the 0-power blocker dealt nothing back"
+    );
+    assert_eq!(runner.state().phase, Phase::EndCombat);
+    assert!(
+        !runner.state().objects[&sidequest].transformed,
+        "CR 120.1 + CR 120.3: 6 damage to an opponent's CREATURE is not damage \
+         dealt to a player, so the player threshold is not met"
+    );
+}
+
+/// Synthetic class row for the existential OPPONENT subject (the corpus cards
+/// with it — Lightning Phoenix, Spinerock Knoll — need their own scaffolding).
+/// "if an opponent was dealt 3 or more damage this turn" must NOT be satisfied
+/// by 3 combat damage dealt to an opponent's CREATURE. Revert-failing: with the
+/// pre-fix contentless `Typed{Opponent}` recipient the creature's damage matched
+/// (its controller is the opponent) and the trigger drew a card.
+#[test]
+fn opponent_damage_threshold_refuses_creature_damage() {
+    let (mut runner, attacker, blocker, _enchantment) = opponent_threshold_board();
+
+    // The 3/3 attacker is blocked by the 0/3 wall: all 3 damage goes to the
+    // creature, none to a player.
+    run_combat(&mut runner, vec![attacker], vec![(blocker, attacker)]);
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::End)
+    });
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        20,
+        "reach-guard: no damage reached the player"
+    );
+    assert_eq!(
+        runner.state().objects[&blocker].zone,
+        Zone::Graveyard,
+        "reach-guard: the blocker took 3 lethal damage and died"
+    );
+    assert_eq!(
+        hand_len(&runner, P0),
+        0,
+        "CR 120.1 + CR 120.3: damage to an opponent's CREATURE does not satisfy \
+         the opponent-player threshold"
+    );
+}
+
+/// Paired positive for the synthetic opponent-subject row: the same 3 damage
+/// dealt to the opponent PLAYER satisfies the threshold and the trigger draws.
+#[test]
+fn opponent_damage_threshold_fires_on_player_damage() {
+    let (mut runner, attacker, _blocker, _enchantment) = opponent_threshold_board();
+
+    // Unblocked: the 3/3 attacker deals 3 to P1.
+    run_combat(&mut runner, vec![attacker], vec![]);
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::End)
+    });
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        17,
+        "reach-guard: 3 damage reached the player"
+    );
+    assert_eq!(
+        hand_len(&runner, P0),
+        1,
+        "the opponent-player threshold is met and the end-step trigger draws"
+    );
+}
+
+/// Board for the two synthetic opponent-subject rows: P0's end-step enchantment
+/// ("if an opponent was dealt 3 or more damage this turn, draw a card"), a 3/3
+/// attacker, P1's 0/3 blocker, and a stocked library. Returns
+/// (runner, attacker, blocker, enchantment).
+fn opponent_threshold_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    const SYNTHETIC: &str = "At the beginning of your end step, if an opponent \
+        was dealt 3 or more damage this turn, draw a card.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let enchantment = scenario
+        .add_enchantment_from_oracle(P0, "Opponent Threshold Probe", SYNTHETIC)
+        .id();
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 3, 3).id();
+    let blocker = scenario.add_creature(P1, "Test Wall", 0, 3).id();
+    scenario.with_library_top(P0, &["D1", "D2", "D3"]);
+    let runner = scenario.build();
+    (runner, attacker, blocker, enchantment)
+}
+
+/// P0's hand size.
+fn hand_len(runner: &GameRunner, player: PlayerId) -> usize {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| p.hand.len())
+        .unwrap_or(0)
+}
+
+// ===========================================================================
+// R10–R13 — U5: the described attach host is chosen while resolving
+// ===========================================================================
+
+/// CR 115.1d + CR 608.2d + CR 609.3: with no creature left at end of combat,
+/// the Sidequest STILL transforms and only the attach does nothing.
+///
+/// This row fails before the timing fix: the described host was a mandatory
+/// STACK-time target slot, so with no legal creature the whole triggered ability
+/// was removed (CR 603.3d) and the transform never happened.
+#[test]
+fn play_blitzball_transforms_without_a_legal_attach_host() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sidequest = scenario
+        .add_enchantment_from_oracle(P0, "Sidequest: Play Blitzball", PLAY_BLITZBALL)
+        .id();
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 4, 4).id();
+    let donor = scenario
+        .add_artifact_from_oracle(P1, "World Champion, Celestial Weapon", WORLD_CHAMPION)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, DESTROY)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    inject_back_face(&mut runner, sidequest, donor);
+
+    let mut pump_targets = vec![TargetRef::Object(attacker)];
+    drive(&mut runner, &mut pump_targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::BeginCombat)
+    });
+    run_combat(&mut runner, vec![attacker], vec![]);
+
+    // Destroy the 4/4 (pumped to 6/4) after combat damage and before the
+    // end-of-combat step, so the described host has no candidate when the
+    // trigger fires.
+    runner.cast(destroy).target_object(attacker).resolve();
+    assert_eq!(
+        runner.state().objects[&attacker].zone,
+        Zone::Graveyard,
+        "reach-guard: the only potential attach host is gone before end of combat"
+    );
+
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::EndCombat)
+    });
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        14,
+        "reach-guard: the 4/4 was pumped to 6/4 and dealt 6 combat damage"
+    );
+    assert_eq!(runner.state().phase, Phase::EndCombat);
+    assert!(
+        runner.state().objects[&sidequest].transformed,
+        "CR 609.3: the transform instruction still resolves when the attach has \
+         no legal host (before the fix the whole trigger was dropped)"
+    );
+    assert_eq!(
+        runner.state().objects[&sidequest].attached_to,
+        None,
+        "the attach has no legal host and does nothing"
+    );
+    assert!(
+        !runner.state().objects[&attacker]
+            .attachments
+            .contains(&sidequest),
+        "the dead attacker's attachment list must stay empty"
+    );
+}
+
+/// CR 115.1d + CR 608.2d: the host is chosen while the trigger RESOLVES, so a
+/// host that leaves play while the trigger is on the stack changes the choice —
+/// the trigger still transforms and the attach does nothing (CR 609.3).
+///
+/// Revert-failing twice: with the pre-fix stack-time slot the trigger is
+/// announced with the attacker as its declared target, so destroying it makes
+/// the ability illegal and the transform never happens; a fire-time host
+/// snapshot would attach the source to the dead host.
+#[test]
+fn play_blitzball_host_leaves_while_trigger_is_on_the_stack() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sidequest = scenario
+        .add_enchantment_from_oracle(P0, "Sidequest: Play Blitzball", PLAY_BLITZBALL)
+        .id();
+    // The sole creature is both the attacker and the only potential host.
+    let host = scenario.add_creature(P0, "Grizzly Bears", 4, 4).id();
+    let donor = scenario
+        .add_artifact_from_oracle(P1, "World Champion, Celestial Weapon", WORLD_CHAMPION)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    // P1 (the non-active player) holds the instant that removes the host.
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P1, "Murder", true, DESTROY)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    inject_back_face(&mut runner, sidequest, donor);
+
+    let mut pump_targets = vec![TargetRef::Object(host)];
+    drive(&mut runner, &mut pump_targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::BeginCombat)
+    });
+    run_combat(&mut runner, vec![host], vec![]);
+
+    // Precondition (asserted, not assumed): the end-of-combat trigger is ON THE
+    // STACK and P1 holds priority.
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
+        !r.state().stack.is_empty()
+            && matches!(
+                r.state().waiting_for,
+                WaitingFor::Priority { player } if player == P1
+            )
+    });
+    assert!(
+        !runner.state().stack.is_empty(),
+        "precondition: the trigger is waiting on the stack"
+    );
+
+    // P1 destroys the only potential host while the trigger waits.
+    drive_with_priority_response(
+        &mut runner,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        PriorityResponse {
+            player: P1,
+            spell: destroy,
+            target: TargetRef::Object(host),
+        },
+        |r| at_phase_quiet(r, Phase::EndCombat),
+    );
+
+    assert_eq!(
+        runner.state().objects[&host].zone,
+        Zone::Graveyard,
+        "reach-guard: the host left the battlefield before the trigger resolved"
+    );
+    assert!(
+        runner.state().objects[&sidequest].transformed,
+        "the transform still resolves — the resolution-time host choice simply \
+         finds no candidate"
+    );
+    assert_eq!(
+        runner.state().objects[&sidequest].attached_to,
+        None,
+        "the host is gone; the attach does nothing (CR 609.3)"
+    );
+}
+
+/// CR 608.2c + CR 115.1d: with TWO legal hosts the choice is parked, and it
+/// arrives AFTER the transform (the instructions are followed in order). The
+/// prompt offers exactly the surviving creatures; the chosen host receives the
+/// attachment and the unchosen one does not.
+#[test]
+fn play_blitzball_two_hosts_prompt_after_the_transform() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sidequest = scenario
+        .add_enchantment_from_oracle(P0, "Sidequest: Play Blitzball", PLAY_BLITZBALL)
+        .id();
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 4, 4).id();
+    let host_a = scenario.add_creature(P0, "Homebody A", 1, 1).id();
+    let host_b = scenario.add_creature(P0, "Homebody B", 1, 1).id();
+    let donor = scenario
+        .add_artifact_from_oracle(P1, "World Champion, Celestial Weapon", WORLD_CHAMPION)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, DESTROY)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    inject_back_face(&mut runner, sidequest, donor);
+
+    // Pump the ATTACKER (4/4 → 6/4), so combat deals the threshold 6; the two
+    // home creatures then survive as the only legal hosts.
+    let mut pump_targets = vec![TargetRef::Object(attacker)];
+    drive(&mut runner, &mut pump_targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::BeginCombat)
+    });
+    run_combat(&mut runner, vec![attacker], vec![]);
+
+    // The attacker dies after dealing its 6, leaving exactly two hosts.
+    runner.cast(destroy).target_object(attacker).resolve();
+    assert_eq!(
+        runner.state().objects[&attacker].zone,
+        Zone::Graveyard,
+        "reach-guard: the attacker left, so exactly two legal hosts remain"
+    );
+
+    // Stop AT the parked host choice.
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
+        matches!(
+            r.state().waiting_for,
+            WaitingFor::EffectZoneChoice { effect_kind, .. } if effect_kind == EffectKind::Attach
+        )
+    });
+
+    assert!(
+        runner.state().objects[&sidequest].transformed,
+        "CR 608.2c: the transform instruction precedes the attach, so it has \
+         already resolved when the host prompt appears"
+    );
+    let cards = match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { cards, .. } => cards.clone(),
+        other => panic!("expected the parked attach host choice, got {other:?}"),
+    };
+    assert_eq!(
+        cards.len(),
+        2,
+        "exactly the two surviving creatures are legal hosts: {cards:?}"
+    );
+    assert!(cards.contains(&host_a) && cards.contains(&host_b));
+    assert!(
+        !cards.contains(&attacker),
+        "the destroyed attacker is not a host candidate"
+    );
+    assert!(
+        !cards.contains(&sidequest),
+        "the source itself is not a creature and never appears as a host"
+    );
+
+    // Choose host B; the attachment must land there and nowhere else.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![host_b],
+        })
+        .expect("the parked host choice must accept the selection");
+    drive(&mut runner, &mut Vec::new(), &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::EndCombat)
+    });
+
+    assert_eq!(
+        runner.state().objects[&sidequest].attached_to,
+        Some(AttachTarget::Object(host_b)),
+        "the chosen host receives the attachment"
+    );
+    assert!(
+        runner.state().objects[&host_b]
+            .attachments
+            .contains(&sidequest),
+        "the chosen host must list the Sidequest among its attachments"
+    );
+    assert!(
+        !runner.state().objects[&host_a]
+            .attachments
+            .contains(&sidequest),
+        "the unchosen host must not receive the attachment"
+    );
+}
+
+/// Stonehewer Giant's searched-up Equipment (verbatim Oracle text).
+const STONEHEWER_GIANT: &str = "Vigilance\n{1}{W}, {T}: Search your library for an Equipment card, put it onto the battlefield, attach it to a creature you control, then shuffle.";
+
+/// Floating mana for activation costs (the `issue_605_calming_licid.rs` idiom).
+fn floating_mana(n: usize, ty: ManaType) -> Vec<ManaUnit> {
+    (0..n)
+        .map(|_| ManaUnit::new(ty, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+/// CR 115.1d + CR 608.2d: the MOVED-CARD attach class. Stonehewer Giant searches
+/// an Equipment onto the battlefield and attaches it to "a creature you control"
+/// — a described host — so the host is chosen while the ability resolves. The
+/// Giant is the only creature, so the single legal host is auto-bound and the
+/// moved Equipment ends up attached to it (the attachment role still resolves
+/// through the shared `resolve_attachment_ids` cascade).
+#[test]
+fn stonehewer_giant_searched_equipment_attaches_to_the_sole_host() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let giant = scenario
+        .add_creature_from_oracle(P0, "Stonehewer Giant", 4, 4, STONEHEWER_GIANT)
+        .id();
+    let equipment = scenario.add_card_to_library_top(P0, "Bonesplitter");
+    scenario.with_mana_pool(P0, floating_mana(2, ManaType::White));
+    let mut runner = scenario.build();
+    {
+        // The search filter is the Equipment subtype; the card must read as an
+        // Equipment CARD in the library for the search to find it.
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&equipment)
+            .expect("the library card exists");
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        obj.base_card_types.subtypes.push("Equipment".to_string());
+    }
+
+    // CR 701.23a: the activation halts at the search offer.
+    let outcome = runner.activate(giant, 0).resolve();
+    match outcome.final_waiting_for() {
+        WaitingFor::SearchChoice { cards, .. } => assert!(
+            cards.contains(&equipment),
+            "the Equipment card must be offered: {cards:?}"
+        ),
+        other => panic!("expected SearchChoice, got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![equipment],
+        })
+        .expect("selecting the Equipment must continue resolution");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&equipment].zone,
+        Zone::Battlefield,
+        "reach-guard: the searched Equipment left the library and entered play"
+    );
+    assert_eq!(
+        runner.state().objects[&equipment].attached_to,
+        Some(AttachTarget::Object(giant)),
+        "the Giant is the sole legal host, so the moved-card attach auto-binds it"
+    );
+    assert!(
+        runner.state().objects[&giant]
+            .attachments
+            .contains(&equipment),
+        "the Giant must list the Equipment among its attachments"
+    );
+}
+
+// ===========================================================================
+// LOW-2 — the multi-attachment described-host class (Fumble)
+// ===========================================================================
+
+/// Verbatim Oracle text (Scryfall / the local export).
+const FUMBLE: &str = "Return target creature to its owner's hand. Gain control of all Auras and Equipment that were attached to it, then attach them to another creature.";
+
+/// CR 115.1d + CR 608.2d + CR 609.3 + CR 701.3b (ACCEPTED DECISION): Fumble's
+/// "then attach them to another creature" is a Resolution-timed described-host
+/// Attach whose INTENDED attachment set is the Auras/Equipment the previous
+/// instruction gained control of. `GainControlAll` does not publish that set as
+/// a typed attachment candidate set — a pre-existing limitation of the mass
+/// control-change effect, out of scope for this fix — so the intended set is
+/// never re-homed: the Aura stays unattached and leaves play via the
+/// unattached-Aura state-based action (CR 704.5m), the Equipment stays
+/// unattached on the battlefield (CR 704.5n), the bounce and the control change
+/// still resolve, and no error surfaces. A2 pins the same decision for a
+/// direct-constructed ability; this row pins it at the full-pipeline level.
+///
+/// DISCLOSED PRE-EXISTING DEFECT (surfaced by the whole-set host guard the
+/// review asked for; deliberately NOT fixed in this text/assertion round): the
+/// instruction is not a no-op as a whole. Its attachment operand is the plural
+/// anaphor "them", which the parser encodes as `TargetFilter::ParentTarget`;
+/// that tier of `attach.rs::resolve_attachment_ids` falls back to the ability's
+/// declared target — the BOUNCED creature — so the instruction attaches that
+/// creature to the described host. Measured on this exact row:
+/// `victim.attached_to == Some(Object(other))` and
+/// `other.attachments == [victim]`. The plural antecedent has no typed encoding
+/// in the AST (`ParentTarget` is singular), so the fix is an engine/AST change
+/// (a "the set this instruction gained control of" context reference, with
+/// `GainControlAll` publishing that set), not a test edit. The corpus class is
+/// narrow: of 35,977 cards, only Fumble prints this plural-anaphor shape
+/// (Outfitted Jouster's "attach them to Outfitted Jouster" names a conjured set
+/// instead). The bogus creature→host pair is pinned by the KNOWN-BAD LOCK below
+/// so the eventual fix has a tripwire to invert; the intended-set no-op and its
+/// reach-guards are asserted alongside it.
+///
+/// NAME: renamed from `fumble_multi_attachment_attach_is_a_silent_noop` — the
+/// attach instruction is not a silent no-op (see the defect note above); only
+/// the INTENDED attachment set is never re-homed.
+#[test]
+fn fumble_gained_attachment_set_is_not_rehomed() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P1, "Fumble Target", 2, 2).id();
+    let other = scenario.add_creature(P0, "Other Bear", 2, 2).id();
+    // An Aura the caster does NOT control (the control change is observable) and
+    // an Equipment the caster does not control. The Equipment survives the
+    // bounce (CR 704.5n), so the control-change and "nothing newly attached"
+    // assertions stay meaningful after the host leaves.
+    let aura = scenario
+        .add_enchantment_from_oracle(
+            P1,
+            "Test Aura",
+            "Enchant creature\nEnchanted creature can't attack or block.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let equipment = scenario
+        .add_artifact_from_oracle(P1, "Test Sword", "Equipped creature gets +2/+0.")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let fumble = scenario
+        .add_spell_to_hand_from_oracle(P0, "Fumble", false, FUMBLE)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    attach::attach_to(runner.state_mut(), aura, victim);
+    attach::attach_to(runner.state_mut(), equipment, victim);
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(victim)),
+        "precondition: the Aura is attached to the Fumble target"
+    );
+    assert_eq!(
+        runner.state().objects[&equipment].attached_to,
+        Some(AttachTarget::Object(victim)),
+        "precondition: the Equipment is attached to the Fumble target"
+    );
+    assert_eq!(runner.state().objects[&aura].controller, P1);
+    assert_eq!(runner.state().objects[&equipment].controller, P1);
+
+    let outcome = runner.cast(fumble).target_object(victim).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the spell must resolve to a quiet priority window — no error, no prompt: {:?}",
+        outcome.final_waiting_for()
+    );
+
+    // Reach-guards: the bounce and the control change both resolved.
+    assert_eq!(
+        outcome.zone_of(victim),
+        Zone::Hand,
+        "the target creature is returned to its owner's hand"
+    );
+    assert_eq!(
+        runner.state().objects[&equipment].controller,
+        P0,
+        "control of the attached Equipment is gained"
+    );
+
+    // The accepted no-op: nothing was NEWLY attached. The Equipment is merely
+    // unattached (CR 704.5n) and the host-less Aura left play via the
+    // unattached-Aura state-based action (CR 704.5m) because the attach
+    // instruction could not re-home it.
+    assert_eq!(
+        runner.state().objects[&equipment].attached_to,
+        None,
+        "the Equipment is not attached to anything after the no-op"
+    );
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        None,
+        "the Aura is not attached to anything after the no-op"
+    );
+    assert!(
+        !runner.state().objects[&other]
+            .attachments
+            .contains(&equipment),
+        "the other creature must not receive the Equipment"
+    );
+    assert!(
+        !runner.state().objects[&other].attachments.contains(&aura),
+        "the other creature must not receive the Aura"
+    );
+    // KNOWN-BAD LOCK (the plural-anaphor defect documented on this row): the
+    // engine attaches the BOUNCED creature to the candidate host, because the
+    // plural "them" lowers to `TargetFilter::ParentTarget` and that tier falls
+    // back to the ability's declared target. This is pinned on purpose: it must
+    // be INVERTED when the plural-anaphor fix supplies the gained
+    // Aura/Equipment set — after that fix the victim is NOT attached to
+    // anything, and the gained set is re-homed to the host instead.
+    assert_eq!(
+        runner.state().objects[&victim].attached_to,
+        Some(AttachTarget::Object(other)),
+        "KNOWN-BAD: the bounced creature is attached to the candidate host"
+    );
+    assert!(
+        runner.state().objects[&other].attachments.contains(&victim),
+        "KNOWN-BAD: the candidate host lists the bounced creature as an attachment"
+    );
+    // Reach-guard (CR 704.5n: an Equipment stays in play when its host leaves):
+    // the Equipment must still be on the battlefield, otherwise the two guards
+    // above could pass vacuously by the candidate object having left play.
+    assert_eq!(
+        runner.state().objects[&equipment].zone,
+        Zone::Battlefield,
+        "reach-guard: the Equipment survives its host leaving the battlefield"
     );
 }

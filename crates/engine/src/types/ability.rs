@@ -9687,13 +9687,35 @@ impl TrackedAnaphorSource {
 /// CR 120.9: Grouping key for damage-history aggregation. CR 120.9 distinguishes
 /// damage dealt "by a specific source" from damage in the aggregate, so any
 /// query that needs per-source partitioning before aggregation must select a
-/// key here. Today only `SourceId` is needed; future axes (e.g., per-target)
-/// fit cleanly as additional variants.
+/// key here. Two axes exist: `SourceId` (which participant dealt the damage) and
+/// `Target` (which participant received it); both partition the same record
+/// stream, and the selected `AggregateFunction` is applied across the per-group
+/// sums (`Max` is the existential reading, `Sum` collapses to the ungrouped
+/// total).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DamageGroupKey {
     /// CR 120.9: Group records by `DamageRecord::source_id` so the resolver can
     /// answer "the most damage dealt by any single source."
     SourceId,
+    /// CR 603.4: Group records by `DamageRecord::target` — the damaged object or
+    /// player — so the resolver can answer "the most damage dealt to any single
+    /// recipient". This is the existential reading of the printed phrase "a player
+    /// / an opponent was dealt N or more damage this turn": that clause is true
+    /// exactly when SOME ONE recipient was dealt that much, because the
+    /// intervening-if is evaluated against every recipient of the turn's damage
+    /// (CR 603.4), never against the sum across recipients.
+    ///
+    /// Mirrors `SourceId`'s partitioning on the recipient axis (CR 120.9's
+    /// grouping family — the same record stream partition, keyed by the other
+    /// participant). `Max` over the per-recipient sums is the existential test;
+    /// `Sum` over them equals the ungrouped total, so `Some(Target) + Sum` and
+    /// `None` coincide.
+    ///
+    /// Object recipients that left and returned share an `ObjectId` but are
+    /// different objects (CR 400.7); the current consumers are player-recipient
+    /// thresholds, where the axis is exact. A future per-object-incarnation axis
+    /// belongs to a separate variant.
+    Target,
 }
 
 /// A measurable property of a game object for aggregate queries.
@@ -20208,6 +20230,39 @@ impl TargetFilter {
             self,
             TargetFilter::Typed(tf) if tf.type_filters.is_empty() && tf.properties.is_empty()
         )
+    }
+
+    /// CR 115.10a + CR 608.2d: True when this filter denotes a
+    /// population of BATTLEFIELD OBJECTS — the only population a resolution-time
+    /// battlefield-object choice (`WaitingFor::EffectZoneChoice` with
+    /// `effect_kind: Attach`) can offer. Consumers: the clause-timing classifier
+    /// (`oracle_effect::lower::target_choice_timing_for_clause`, deciding whether a
+    /// printed described-host Attach chooses its host while resolving) and the
+    /// runtime host gate (`effects::attach::prompt_described_host_choice`, the
+    /// independent second guard).
+    ///
+    /// POSITIVE and FAIL-CLOSED, like `names_enumerable_population`: a false
+    /// negative only leaves a clause on its current `Stack` timing (changed
+    /// behaviour requires an explicit opt-in row), while a false positive would
+    /// offer a battlefield prompt for a player- or off-zone-denoting host.
+    pub fn denotes_battlefield_objects(&self) -> bool {
+        self.names_enumerable_population()
+            && !self.denotes_player_target()
+            && self
+                .extract_zones()
+                .iter()
+                .all(|zone| *zone == Zone::Battlefield)
+            && match self {
+                TargetFilter::Typed(tf) => !tf.type_filters.is_empty(),
+                TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                    !filters.is_empty()
+                        && filters
+                            .iter()
+                            .all(TargetFilter::denotes_battlefield_objects)
+                }
+                TargetFilter::Not { filter } => filter.denotes_battlefield_objects(),
+                _ => false,
+            }
     }
 
     /// CR 608.2c + CR 109.4: If this filter is a player-only reference to the
@@ -37808,6 +37863,100 @@ mod player_target_slot_tests {
             assert!(
                 !filter.denotes_player_target(),
                 "{filter:?} does not name a player-only target slot"
+            );
+        }
+    }
+
+    /// CR 115.10a + CR 608.2d: `denotes_battlefield_objects` is the
+    /// capability boundary shared by the parser's clause-timing classifier and
+    /// the runtime described-host prompt. Every row is a boundary of that
+    /// capability, so a future widening must opt in here explicitly.
+    #[test]
+    fn denotes_battlefield_objects_admits_only_battlefield_object_populations() {
+        let creature_you =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let land_you = TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You));
+        let property_only =
+            |props: Vec<FilterProp>| TargetFilter::Typed(TypedFilter::default().properties(props));
+
+        for filter in [
+            // Canonical described host: "a creature you control".
+            creature_you.clone(),
+            // Aura Graft's "another permanent it can enchant" — a type-constrained
+            // object population (CR 115.4 "another").
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Another])),
+            // Reins of the Vinesteed: the property narrows, it does not name a
+            // player or an off-battlefield zone.
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::CreatureType,
+                    reference: Some(Box::new(TargetFilter::ParentTarget)),
+                    relation: SharedQualityRelation::default(),
+                },
+            ])),
+            // Explicit battlefield zone is admitted.
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }])),
+            // All legs.
+            TargetFilter::Or {
+                filters: vec![creature_you.clone(), land_you],
+            },
+            // Mirrors `names_enumerable_population`'s `Not` arm: over battlefield
+            // objects the complement is still a battlefield population.
+            TargetFilter::Not {
+                filter: Box::new(creature_you.clone()),
+            },
+        ] {
+            assert!(
+                filter.denotes_battlefield_objects(),
+                "{filter:?} denotes a battlefield object population"
+            );
+        }
+
+        for filter in [
+            // Property-only `Typed` — the shape the parser emits for a partially
+            // classified recipient; the non-empty-`type_filters` conjunct refuses
+            // it (a future card that needs it opts in with its own row).
+            property_only(vec![FilterProp::Token]),
+            // Maddening Hex: CR 115.4 "any other" is player-or-object, so a false
+            // positive would offer a battlefield prompt for a random opponent.
+            property_only(vec![FilterProp::Another]),
+            // Spellweaver Volute: off-battlefield zone.
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Instant".to_string())
+                    .properties(vec![
+                        FilterProp::Another,
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ]),
+            ),
+            // Fail-closed on the property-only leg.
+            TargetFilter::And {
+                filters: vec![
+                    creature_you.clone(),
+                    property_only(vec![FilterProp::Another]),
+                ],
+            },
+            // Zone recursion.
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature().properties(
+                    vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                ))),
+            },
+            // Sweep shapes / anaphors / players / contentless.
+            TargetFilter::Any,
+            TargetFilter::SelfRef,
+            TargetFilter::Player,
+            TargetFilter::Typed(TypedFilter::default()),
+        ] {
+            assert!(
+                !filter.denotes_battlefield_objects(),
+                "{filter:?} does not denote a battlefield object population"
             );
         }
     }

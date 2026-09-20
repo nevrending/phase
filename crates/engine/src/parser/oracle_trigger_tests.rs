@@ -11683,25 +11683,51 @@ fn trigger_intervening_if_you_were_dealt_damage_threshold_this_turn() {
             "At the beginning of each end step, if you were dealt 4 or more damage this turn, exile this artifact.",
             "Boarded Window",
         );
-    assert!(matches!(
-        def.condition,
-        Some(TriggerCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref {
-                qty: QuantityRef::DamageDealtThisTurn {
-                    source,
-                    target,
-                    ..
-                },
+    let Some(TriggerCondition::QuantityComparison {
+        lhs:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::DamageDealtThisTurn {
+                        source,
+                        target,
+                        aggregate,
+                        group_by,
+                        ..
+                    },
             },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 4 },
-        }) if *source == TargetFilter::Any
-            && matches!(
-                &*target,
-                TargetFilter::Typed(ref typed)
-                    if typed.controller == Some(ControllerRef::You)
-            )
-    ));
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 4 },
+    }) = def.condition
+    else {
+        panic!(
+            "expected QuantityComparison(DamageDealtThisTurn) GE 4, got: {:?}",
+            def.condition
+        );
+    };
+    // "you" is the singleton subject: any source, one recipient, so `Sum` with
+    // no grouping.
+    assert_eq!(*source, TargetFilter::Any, "any source");
+    assert_eq!(aggregate, AggregateFunction::Sum);
+    assert!(
+        group_by.is_none(),
+        "the singleton subject carries no grouping"
+    );
+    // CR 120.1 + CR 120.3 + CR 120.9: the recipient is the player-only shape
+    // `And[Player, Typed{controller: You}]` — the `Player` child refuses object
+    // recipients, so damage to a permanent you control can never satisfy it.
+    let TargetFilter::And { filters } = target.as_ref() else {
+        panic!("expected the player-only And recipient filter, got {target:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "expected [Player, Typed], got {filters:?}"
+    );
+    assert_eq!(filters[0], TargetFilter::Player);
+    let TargetFilter::Typed(tf) = &filters[1] else {
+        panic!("expected the typed controller leg, got {:?}", filters[1]);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
 }
 
 #[test]

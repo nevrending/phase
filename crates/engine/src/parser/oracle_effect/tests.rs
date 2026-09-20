@@ -51891,6 +51891,131 @@ fn attach_just_moved_gilgamesh_any_number_equipment_reflexive_attach() {
     );
 }
 
+/// First `Effect::Attach` node in a parsed chain (root first, then
+/// sub-abilities), panicking when the clause did not lower to one.
+fn attach_node(def: &AbilityDefinition) -> &AbilityDefinition {
+    if matches!(&*def.effect, Effect::Attach { .. }) {
+        return def;
+    }
+    def.sub_ability
+        .as_deref()
+        .map(attach_node)
+        .unwrap_or_else(|| panic!("expected an Attach node in the parsed chain: {def:?}"))
+}
+
+/// CR 115.1d + CR 608.2d: Sidequest: Play Blitzball's "transform this
+/// enchantment, then attach it to a creature you control". The printed host is
+/// DESCRIBED — no literal "target" — so the host is chosen while the effect
+/// resolves. Deciding conjuncts: context-ref attachment (the U3 anaphor binds
+/// "it" to the source) + host needs a declared slot + host denotes battlefield
+/// objects + the clause prints the "attach " verb; the shared `"target "` scan
+/// then finds none.
+#[test]
+fn attach_host_timing_play_blitzball_is_resolution() {
+    let def = parse_effect_chain(
+        "transform ~, then attach it to a creature you control.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "a described battlefield-object host is chosen while the effect resolves"
+    );
+}
+
+/// CR 115.1d + CR 608.2d: Aura Graft's "Attach it to another permanent it can
+/// enchant" — described host, battlefield objects, printed verb ⇒ Resolution.
+#[test]
+fn attach_host_timing_aura_graft_is_resolution() {
+    let def = parse_effect_chain(
+        "Gain control of target Aura that's attached to a permanent. Attach it to another permanent it can enchant.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "Aura Graft's host is described, not targeted"
+    );
+}
+
+/// CR 115.1d + CR 608.2d: Stonehewer Giant's searched-up Equipment is attached
+/// to "a creature you control" — described host ⇒ Resolution (the moved-card
+/// attachment role still resolves through the shared cascade at execution).
+#[test]
+fn attach_host_timing_stonehewer_giant_is_resolution() {
+    let def = parse_effect_chain(
+        "Search your library for an Equipment card, put it onto the battlefield, attach it to a creature you control, then shuffle.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "the searched-up Equipment's host is described, not targeted"
+    );
+}
+
+/// CR 115.1d + CR 608.2d: Embercleave's Equipment-ETB "attach it to **target**
+/// creature you control" prints the literal word, so the shared `"target "`
+/// guard keeps the clause Stack even though the other conjuncts match.
+#[test]
+fn attach_host_timing_embercleave_stays_stack() {
+    let def = parse_effect_chain(
+        "attach it to target creature you control.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "a literal \"target\" host keeps stack-time targeting"
+    );
+}
+
+/// CR 702.6a: a keyword-generated Equip clause lowers from the reminder-stripped
+/// fragment `"Equip {3}"`, which prints no "attach " verb — the verb guard is
+/// what keeps the whole keyword class (and the four committed oracle_ir
+/// snapshots) at Stack.
+#[test]
+fn attach_host_timing_equip_keyword_stays_stack() {
+    let equip = crate::parser::oracle::try_parse_equip_lowered("Equip {3}")
+        .expect("Equip {3} must lower to an activated ability");
+    assert_eq!(
+        equip.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "the Equip keyword targets (CR 702.6a); its reminder-stripped fragment prints no verb"
+    );
+}
+
+/// CR 115.4 + CR 608.2d: Maddening Hex's "attach this Aura to another one of
+/// your opponents chosen at random" names a PLAYER population ("any other" is
+/// player-or-object), which the battlefield-object capability refuses ⇒ Stack.
+#[test]
+fn attach_host_timing_maddening_hex_stays_stack() {
+    let def = parse_effect_chain(
+        "Then attach this Aura to another one of your opponents chosen at random.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "a player-valued described host cannot be served by a battlefield-object prompt"
+    );
+}
+
+/// CR 115.1d + CR 608.2d: Spellweaver Volute's "attach this Aura to another
+/// instant card in a graveyard" names an OFF-BATTLEFIELD population ⇒ Stack.
+#[test]
+fn attach_host_timing_spellweaver_volute_stays_stack() {
+    let def = parse_effect_chain(
+        "exile the enchanted card and attach this Aura to another instant card in a graveyard.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "a graveyard-valued described host cannot be served by a battlefield-object prompt"
+    );
+}
+
 /// Quest for the Holy Relic / Stonehewer Giant pattern:
 /// SearchLibrary → ChangeZone(destination=Battlefield) → Attach. The
 /// rewire detects the ChangeZone-to-battlefield parent and sets

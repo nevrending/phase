@@ -4879,7 +4879,14 @@ fn attach_attachment_filter_needs_target_slot(filter: &TargetFilter) -> bool {
 }
 
 /// Whether the host operand of `Effect::Attach` consumes an explicit target.
-fn attach_host_filter_needs_target_slot(filter: &TargetFilter) -> bool {
+///
+/// Single authority for "would this host filter claim a declared target slot?".
+/// Two consumers share it so they cannot drift: the parser's clause-timing
+/// classifier (`oracle_effect::lower::target_choice_timing_for_clause`, deciding
+/// whether a printed described-host Attach chooses its host while resolving) and
+/// the runtime described-host gate
+/// (`effects::attach::prompt_described_host_choice`).
+pub(crate) fn attach_host_filter_needs_target_slot(filter: &TargetFilter) -> bool {
     !filter.is_context_ref()
         && !matches!(
             filter,

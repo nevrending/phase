@@ -1918,31 +1918,47 @@ pub(super) fn change_zone_target_choice_timing(
 }
 
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
+    // CR 115.1d: the "is this a target?" decisions below read the clause's
+    // printed text, so its lowercased fragment is computed once and shared.
+    let lower = clause_ir
+        .source
+        .fragment()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let has_untargeted_resolution_choice = match &clause_ir.parsed.effect {
-        // Preserve the established resolution timing for Attach instructions
-        // whose attachment itself is unbound. The only extra host choice is the
-        // event-scoped "one of them ... to a Samurai" forward-result shape;
-        // ordinary Attach instructions do not have its host-choice continuation.
+        // CR 115.1d + CR 608.2d: an Attach instruction whose ATTACHMENT operand
+        // is itself an untargeted choice ("attach an Equipment", "cast that
+        // card") resolves that choice while the effect resolves; its explicit
+        // "target" counterpart stays stack-time via the shared guard below.
         Effect::Attach { attachment, .. } if !attachment.is_context_ref() => true,
-        Effect::Attach {
-            attachment: TargetFilter::ParentTarget,
-            ..
-        } => matches!(
-            clause_ir.condition.as_ref(),
-            Some(AbilityCondition::ZoneChangedThisWay {
-                destination: Some(Zone::Battlefield),
-                ..
-            })
-        ),
+        // CR 115.1d + CR 608.2d: HOST-side described choice — the attachment role
+        // already resolves without a player choice (a context reference: the source,
+        // the moved card, the gained-control object) and the host is a described
+        // battlefield object that would otherwise claim a declared slot. The printed
+        // verb guard below is what keeps keyword-generated Equip/Fortify/Reconfigure
+        // clauses at Stack: their fragment is the keyword line ("Equip {3}") with no
+        // "attach " verb — measured: 730 cards match the non-text conjuncts, 660 of
+        // them keyword-generated, and the four committed oracle_ir snapshot cards
+        // (short_sword, abraxas_named_equip, conformer_shuriken, batterskull) all
+        // carry fragment "Equip {N}". Without this conjunct a blanket admission
+        // re-times ≈720 corpus cards and changes those four committed snapshots.
+        // This arm also subsumes the removed ParentTarget + ZoneChangedThisWay shape:
+        // armored skyhunter / gilgamesh / vault 101 keep Resolution here, while
+        // adaptive armorer / masterpiece vault keep Stack via the shared "target "
+        // guard below (their printed clause says "target creature you control"), and
+        // the invincible iron man (a ParentTarget host) matches neither arm.
+        Effect::Attach { attachment, target }
+            if attachment.is_context_ref()
+                && crate::game::ability_utils::attach_host_filter_needs_target_slot(target)
+                && target.denotes_battlefield_objects()
+                && nom_primitives::scan_contains(&lower, "attach ") =>
+        {
+            true
+        }
         Effect::CastFromZone { .. } => true,
         _ => false,
     };
     if has_untargeted_resolution_choice {
-        let lower = clause_ir
-            .source
-            .fragment()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
         // CR 115.10a + CR 608.2d: "attach an Equipment" and "cast that card"
         // choose an untargeted object while resolving. Their explicit "target"
         // counterparts remain stack-time choices.
@@ -1951,11 +1967,6 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         }
     }
     if let Effect::ChooseCounterKind { target, .. } = &clause_ir.parsed.effect {
-        let lower = clause_ir
-            .source
-            .fragment()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
         // CR 115.1 + CR 608.2d: "choose a counter on a permanent you
         // control" is an untargeted choice made while the ability resolves.
         // Context references are already bound and need no selection slot.
@@ -1964,11 +1975,6 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         }
     }
     if let Effect::PutCounter { target, .. } = &clause_ir.parsed.effect {
-        let lower = clause_ir
-            .source
-            .fragment()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
         // CR 115.10a: an object is a target only if the text uses the literal
         // word "target"; CR 608.2d: an untargeted choice is made "while
         // applying the effect" (at resolution), not at announcement. Was
@@ -2043,24 +2049,14 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         target,
     } = &clause_ir.parsed.effect
     {
-        let lower = clause_ir
-            .source
-            .fragment()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
         if !nom_primitives::scan_contains(&lower, "target ") && !target.is_context_ref() {
             return TargetChoiceTiming::Resolution;
         }
     }
-    if matches!(clause_ir.parsed.effect, Effect::MultiplyCounter { .. }) {
-        let lower = clause_ir
-            .source
-            .fragment()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if !nom_primitives::scan_contains(&lower, "target ") {
-            return TargetChoiceTiming::Resolution;
-        }
+    if matches!(clause_ir.parsed.effect, Effect::MultiplyCounter { .. })
+        && !nom_primitives::scan_contains(&lower, "target ")
+    {
+        return TargetChoiceTiming::Resolution;
     }
     // CR 701.26a/b: only single-target tap/untap (legacy `Tap`/`Untap`) takes
     // the resolution-timing branch; the mass scope never declares multi-target.
@@ -2071,15 +2067,9 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
             ..
         }
     ) && clause_ir.multi_target.is_some()
+        && !nom_primitives::scan_contains(&lower, "target ")
     {
-        let lower = clause_ir
-            .source
-            .fragment()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if !nom_primitives::scan_contains(&lower, "target ") {
-            return TargetChoiceTiming::Resolution;
-        }
+        return TargetChoiceTiming::Resolution;
     }
 
     // CR 115.10a + CR 608.2d: a `ChooseOneOf` whose every branch was ALREADY
@@ -2140,11 +2130,6 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
     let Effect::ChangeZone { origin, target, .. } = &clause_ir.parsed.effect else {
         return TargetChoiceTiming::Stack;
     };
-    let lower = clause_ir
-        .source
-        .fragment()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
     let has_multi_target =
         clause_ir.multi_target.is_some() || clause_ir.parsed.multi_target.is_some();
     change_zone_target_choice_timing(*origin, target, has_multi_target, &lower)

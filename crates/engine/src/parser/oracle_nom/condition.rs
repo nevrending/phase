@@ -660,6 +660,32 @@ fn parse_damage_kind_qualifier(input: &str) -> OracleResult<'_, DamageKindFilter
     .parse(input)
 }
 
+/// CR 120.1 + CR 120.3 + CR 120.9: The player-only damage-RECIPIENT filter for
+/// the player subjects of a damage-history surface ("a player / an opponent /
+/// you was dealt …"). CR 120.1 lists what damage can be dealt to — battles,
+/// creatures, planeswalkers, and players — and CR 120.3 keys damage's results on
+/// whether the recipient is a player or a permanent; damage dealt to a player's
+/// permanent is therefore a different event from damage dealt to that player.
+/// A bare contentless `Typed { controller }` is wrong here: its controller
+/// predicate lifts onto the record's recipient controller and the stripped
+/// remainder then matches an OBJECT that player controls, letting 6 damage to an
+/// opponent's creature satisfy "an opponent was dealt 6 or more damage".
+///
+/// The established player-only shape is `And { [Player, Typed { controller }] }`
+/// (the sibling idiom in `oracle_nom::quantity::parse_damage_dealt_this_turn_ref`,
+/// "damage dealt to your opponents"): for an object recipient the `And` path
+/// lifts the controller predicate onto the object's controller and the
+/// remaining `Player` child refuses the object outright (`filter.rs`: "Players
+/// are not objects"), so only a player recipient can satisfy the condition.
+fn player_recipient_filter(controller: ControllerRef) -> TargetFilter {
+    TargetFilter::And {
+        filters: vec![
+            TargetFilter::Player,
+            TargetFilter::Typed(TypedFilter::default().controller(controller)),
+        ],
+    }
+}
+
 /// CR 603.4 + CR 120.1 + CR 120.2a / CR 120.2b + CR 120.3 + CR 608.2i:
 /// "you were / a player was / an opponent was dealt N or more
 /// [combat|noncombat] damage this turn" — Boarded Window and Phoenix Chick-style
@@ -667,33 +693,61 @@ fn parse_damage_kind_qualifier(input: &str) -> OracleResult<'_, DamageKindFilter
 /// was dealt 6 or more combat damage this turn"). Any-source damage to the
 /// matching player set.
 ///
-/// Three independent nom axes compose the class:
+/// Four independent nom axes compose the class:
 /// - recipient subject (`you` / `a player` / `an opponent`) → `target`,
+/// - the subject's QUANTIFICATION: `you` names one recipient (singleton:
+///   `Sum` over `None`), while `a player` / `an opponent` name a SET and are
+///   read existentially (`Max` over `Some(DamageGroupKey::Target)`),
 /// - threshold N (`parse_number`),
 /// - optional combat/noncombat qualifier → `DamageKindFilter`, via the shared
 ///   `parse_damage_kind_qualifier` authority (CR 120.2a / CR 120.2b) this
 ///   module's qualifier-bearing damage-history surfaces delegate to.
 ///
+/// CR 603.4: the intervening-if is checked at fire and again as it resolves, so
+/// "a player was dealt N or more" must hold for SOME ONE recipient — the
+/// existential reading — never for the sum across recipients. The singleton
+/// `you` arm keeps `Sum`/`None` because its subject is one player.
+///
 /// CR 120.1: the tally reads the "dealt to" direction (recipient), and CR 120.3
 /// makes the damage's result the amount actually dealt/marked per record.
 /// CR 608.2i: the predicate looks back over the turn's damage records rather than
 /// the live game state, so it answers correctly after a recipient has left.
+///
+/// The threshold-1 siblings keep `Sum`/`None` because their thresholds are 1:
+/// `parse_subject_was_dealt_excess_damage_this_turn`,
+/// `parse_player_dealt_combat_damage_by_source_this_turn` and
+/// `parse_source_was_dealt_damage_this_turn` are satisfied when ANY record
+/// matches, and with non-negative amounts "some record matches" ⟺ "some
+/// recipient's per-recipient sum ≥ 1", so `Sum` and per-recipient `Max`
+/// coincide there. That equivalence is documented, not assumed.
 fn parse_player_was_dealt_damage_threshold_this_turn(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
-    let (rest, (target, passive_verb)) = alt((
+    let (rest, (target, passive_verb, aggregate, group_by)) = alt((
         value(
             (
-                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                player_recipient_filter(ControllerRef::You),
                 " were dealt ",
+                AggregateFunction::Sum,
+                None,
             ),
             tag("you"),
         ),
-        value((TargetFilter::Player, " was dealt "), tag("a player")),
         value(
             (
-                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                TargetFilter::Player,
                 " was dealt ",
+                AggregateFunction::Max,
+                Some(DamageGroupKey::Target),
+            ),
+            tag("a player"),
+        ),
+        value(
+            (
+                player_recipient_filter(ControllerRef::Opponent),
+                " was dealt ",
+                AggregateFunction::Max,
+                Some(DamageGroupKey::Target),
             ),
             tag("an opponent"),
         ),
@@ -713,8 +767,8 @@ fn parse_player_was_dealt_damage_threshold_this_turn(
             QuantityRef::DamageDealtThisTurn {
                 source: Box::new(TargetFilter::Any),
                 target: Box::new(target),
-                aggregate: AggregateFunction::Sum,
-                group_by: None,
+                aggregate,
+                group_by,
                 damage_kind,
 
                 channel: DamageChannel::Total,
@@ -746,7 +800,7 @@ fn parse_player_dealt_combat_damage_by_source_this_turn(
     // Recipient subject: "a player" (any player) or "an opponent".
     let (rest, recipient) = alt((
         value(
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            player_recipient_filter(ControllerRef::Opponent),
             tag("an opponent"),
         ),
         value(TargetFilter::Player, tag("a player")),
@@ -806,7 +860,7 @@ fn parse_source_dealt_damage_this_turn(input: &str) -> OracleResult<'_, StaticCo
     let (rest, _) = tag("damage to ").parse(rest)?;
     let (rest, target) = alt((
         value(
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            player_recipient_filter(ControllerRef::Opponent),
             alt((tag("an opponent"), tag("opponent"))),
         ),
         value(TargetFilter::Player, alt((tag("a player"), tag("player")))),
@@ -848,7 +902,7 @@ fn parse_source_was_dealt_damage_this_turn(input: &str) -> OracleResult<'_, Stat
             alt((tag("~"), tag("this creature"), tag("this permanent"))),
         ),
         value(
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            player_recipient_filter(ControllerRef::Opponent),
             tag("an opponent"),
         ),
     ))
@@ -19658,6 +19712,37 @@ mod tests {
         }
     }
 
+    /// Assert `filter` is the player-only damage-recipient shape
+    /// `And { [Player, Typed { controller }] }` (CR 120.1 + CR 120.3 +
+    /// CR 120.9): the `Player` child refuses object recipients, so damage dealt
+    /// to a permanent the player controls can never satisfy the player subject.
+    fn assert_player_recipient(filter: &TargetFilter, controller: ControllerRef) {
+        match filter {
+            TargetFilter::And { filters } => {
+                assert_eq!(
+                    filters.len(),
+                    2,
+                    "expected [Player, Typed], got {filters:?}"
+                );
+                assert_eq!(filters[0], TargetFilter::Player);
+                let TargetFilter::Typed(tf) = &filters[1] else {
+                    panic!("expected the typed controller leg, got {:?}", filters[1]);
+                };
+                assert!(
+                    tf.type_filters.is_empty() && tf.properties.is_empty(),
+                    "the controller leg must stay contentless, got {tf:?}"
+                );
+                assert_eq!(tf.controller, Some(controller));
+            }
+            other => panic!("expected the player-only And recipient filter, got {other:?}"),
+        }
+    }
+
+    /// CR 603.4: the SINGLETON subject arm — "you" names one recipient, so the
+    /// reading is the plain `Sum` over `None`. The existential subjects
+    /// (`a player` / `an opponent`) carry `Max` over
+    /// `Some(DamageGroupKey::Target)` instead; the sibling rows below pin that
+    /// split.
     #[test]
     fn test_player_was_dealt_damage_threshold_this_turn() {
         let (rest, c) = parse_inner_condition("you were dealt 4 or more damage this turn").unwrap();
@@ -19681,10 +19766,7 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 4 },
             } => {
                 assert_eq!(*source, TargetFilter::Any);
-                let TargetFilter::Typed(typed) = *target else {
-                    panic!("expected typed target filter");
-                };
-                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert_player_recipient(&target, ControllerRef::You);
             }
             other => panic!("expected player damage threshold quantity, got {other:?}"),
         }
@@ -19703,8 +19785,8 @@ mod tests {
                             QuantityRef::DamageDealtThisTurn {
                                 source,
                                 target,
-                                aggregate: AggregateFunction::Sum,
-                                group_by: None,
+                                aggregate: AggregateFunction::Max,
+                                group_by: Some(DamageGroupKey::Target),
                                 damage_kind: DamageKindFilter::Any,
 
                                 channel: DamageChannel::Total,
@@ -19714,10 +19796,7 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 3 },
             } => {
                 assert_eq!(*source, TargetFilter::Any);
-                let TargetFilter::Typed(typed) = *target else {
-                    panic!("expected typed target filter");
-                };
-                assert_eq!(typed.controller, Some(ControllerRef::Opponent));
+                assert_player_recipient(&target, ControllerRef::Opponent);
             }
             other => panic!("expected opponent damage threshold quantity, got {other:?}"),
         }
@@ -19727,7 +19806,12 @@ mod tests {
     /// damage this turn" — the damage-kind axis on the player-subject threshold
     /// (Sidequest: Play Blitzball). Reverting the axis to the single literal
     /// `tag(" or more damage this turn")` makes this input fail to parse at all,
-    /// while the two sibling rows above pin `Any` for the unqualified family.
+    /// while the sibling rows pin `Any` for the unqualified family and
+    /// `Sum`/`None` for the singleton `you` subject.
+    ///
+    /// The existential quantification is `Max` over `Some(DamageGroupKey::Target)`:
+    /// the printed "a player" names a set, and CR 603.4's intervening-if must
+    /// hold for SOME ONE recipient, never for the sum across recipients.
     #[test]
     fn test_player_was_dealt_combat_damage_threshold_this_turn() {
         let (rest, c) =
@@ -19741,8 +19825,8 @@ mod tests {
                             QuantityRef::DamageDealtThisTurn {
                                 source,
                                 target,
-                                aggregate: AggregateFunction::Sum,
-                                group_by: None,
+                                aggregate: AggregateFunction::Max,
+                                group_by: Some(DamageGroupKey::Target),
                                 damage_kind: DamageKindFilter::CombatOnly,
 
                                 channel: DamageChannel::Total,
@@ -19760,7 +19844,9 @@ mod tests {
 
     /// Hostile sibling for the axis: `noncombat` is its own value, and it must
     /// compose with the opponent recipient subject rather than collapsing to
-    /// `CombatOnly` (the arm immediately preceding it) or `Any` (the empty tag).
+    /// `CombatOnly` (the arm immediately preceding it) or `Any` (the empty tag) —
+    /// and it carries the same existential quantification as its player-subject
+    /// sibling.
     #[test]
     fn test_opponent_was_dealt_noncombat_damage_threshold_this_turn() {
         let (rest, c) =
@@ -19775,8 +19861,8 @@ mod tests {
                             QuantityRef::DamageDealtThisTurn {
                                 source,
                                 target,
-                                aggregate: AggregateFunction::Sum,
-                                group_by: None,
+                                aggregate: AggregateFunction::Max,
+                                group_by: Some(DamageGroupKey::Target),
                                 damage_kind: DamageKindFilter::NoncombatOnly,
 
                                 channel: DamageChannel::Total,
@@ -19786,10 +19872,7 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 4 },
             } => {
                 assert_eq!(*source, TargetFilter::Any);
-                let TargetFilter::Typed(typed) = *target else {
-                    panic!("expected typed opponent target filter");
-                };
-                assert_eq!(typed.controller, Some(ControllerRef::Opponent));
+                assert_player_recipient(&target, ControllerRef::Opponent);
             }
             other => panic!("expected opponent noncombat-damage threshold quantity, got {other:?}"),
         }
@@ -19923,10 +20006,7 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
             } => {
                 assert_eq!(*source, TargetFilter::SelfRef);
-                let TargetFilter::Typed(target) = *target else {
-                    panic!("expected typed opponent target");
-                };
-                assert_eq!(target.controller, Some(ControllerRef::Opponent));
+                assert_player_recipient(&target, ControllerRef::Opponent);
             }
             other => panic!("expected self damage-to-opponent condition, got {other:?}"),
         }
@@ -20004,28 +20084,34 @@ mod tests {
     /// Issue #1347 — class coverage: the same predicate with an "an opponent"
     /// recipient and a bare-creature source ("by a creature") still parses,
     /// proving the combinator is parameterized over subject and source rather
-    /// than special-cased to "a player … Zombie".
+    /// than special-cased to "a player … Zombie". The opponent recipient is the
+    /// player-only `And { [Player, Typed{Opponent}] }` shape, so damage dealt to
+    /// an opponent's creature can never satisfy it (CR 120.1 + CR 120.3 +
+    /// CR 120.9).
     #[test]
     fn test_opponent_dealt_combat_damage_by_creature_this_turn() {
         let (rest, c) =
             parse_inner_condition("an opponent was dealt combat damage by a creature this turn")
                 .unwrap();
         assert_eq!(rest, "");
-        assert!(matches!(
-            c,
-            StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::DamageDealtThisTurn {
-                        damage_kind: DamageKindFilter::CombatOnly,
-
-                        channel: DamageChannel::Total,
-                        ..
-                    },
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            target,
+                            damage_kind: DamageKindFilter::CombatOnly,
+                            channel: DamageChannel::Total,
+                            ..
+                        },
                 },
-                comparator: Comparator::GE,
-                rhs: QuantityExpr::Fixed { value: 1 },
-            }
-        ));
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = c
+        else {
+            panic!("expected the opponent combat-damage-by-creature predicate, got {c:?}");
+        };
+        assert_player_recipient(&target, ControllerRef::Opponent);
     }
 
     /// CR 601.2h + CR 603.4 + CR 702.191a: Increment intervening-if parses as
