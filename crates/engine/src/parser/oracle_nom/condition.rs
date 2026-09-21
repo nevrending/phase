@@ -794,7 +794,7 @@ fn parse_damage_kind_qualifier(input: &str) -> OracleResult<'_, DamageKindFilter
     .parse(input)
 }
 
-/// CR 120.1 + CR 120.3 + CR 120.9: The player-only damage-RECIPIENT filter for
+/// CR 120.1 + CR 120.3: The player-only damage-RECIPIENT filter for
 /// the player subjects of a damage-history surface ("a player / an opponent /
 /// you was dealt …"). CR 120.1 lists what damage can be dealt to — battles,
 /// creatures, planeswalkers, and players — and CR 120.3 keys damage's results on

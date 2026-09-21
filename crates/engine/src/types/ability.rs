@@ -15202,9 +15202,12 @@ impl AttachSelection {
 ///
 /// `AnyNumber` follows CR 107.1c ("any number" includes zero); `UpTo(N)` is the
 /// "up to N" form; `All` is a DETERMINED set ("attach all Equipment you
-/// control") that has no player choice at all. The engine's attachment resolver
-/// serves one operand today, so `All` maps to the legacy single-choice bounds
-/// and is recorded here so the enumeration follow-up has a typed seam.
+/// control") that has NO player choice at all — every matching object attaches.
+/// The executor loop already delivers multi-object attachment sets (the
+/// whole-set pipeline row pins it); what `All` still lacks is the determined-set
+/// enumeration itself (there is no "attach every match without a choice" path),
+/// so it maps to the legacy single-choice bounds today. The variant is recorded
+/// so that follow-up has a typed seam.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachCardinality {
@@ -15215,8 +15218,9 @@ pub enum AttachCardinality {
     UpTo(QuantityExpr),
     /// CR 107.1c: "any number of <objects>" — zero or more.
     AnyNumber,
-    /// "all <objects>" — every matching object (a determined set; the resolver's
-    /// single-operand limitation is recorded, not modelled, for now).
+    /// "all <objects>" — every matching object (a determined set: no player
+    /// choice; the determined-set enumeration is the deferred seam, see the
+    /// enum doc).
     All,
 }
 
@@ -15228,8 +15232,9 @@ impl AttachCardinality {
 
     /// CR 107.1c + CR 608.2d: the target-count bounds this printed cardinality
     /// imposes on the resolution-time attachment choice. `All` maps to the
-    /// legacy single-choice bounds (documented gap: the resolver serves one
-    /// operand; see the enum doc).
+    /// legacy single-choice bounds because the determined-set enumeration does
+    /// not exist yet (see the enum doc); the mapping is behavior-preserving for
+    /// the four cards that print it today.
     pub fn to_multi_target_spec(&self) -> MultiTargetSpec {
         match self {
             Self::One | Self::All => MultiTargetSpec::fixed(1, 1),
