@@ -52076,41 +52076,37 @@ fn plural_demonstrative_attachment_clause_is_unsupported() {
     );
 }
 
-/// CR 608.2c + CR 608.2k: the guard's `plural_object_pronoun_ref` conjunct is
-/// what refuses. When the parse context carries a typed plural antecedent (the
-/// linked-exile pool — the one plural set the engine does model), the phrase is
-/// NOT unrepresented and the legacy singular anaphor path runs instead. Called
+/// CR 608.2c + CR 608.2k: the refusal is UNCONDITIONAL.
+/// `plural_object_pronoun_ref` carries the linked-exile pool for QUANTITY
+/// references, but nothing consumes it into an attachment OPERAND —
+/// `parse_attachment_anaphor` ignores it and would still bind the singular
+/// `ParentTarget`, the exact wrong-operand shape the guard prevents. Both a bare
+/// context and a context carrying that typed antecedent are refused; called
 /// through the `pub(super)` entry so the hand-built context is the real one.
 #[test]
-fn plural_attachment_anaphor_guard_steps_aside_with_typed_antecedent() {
+fn plural_attachment_anaphor_is_refused_even_with_a_typed_antecedent() {
     let text = "attach them to another creature";
     let lower = text.to_ascii_lowercase();
-    let mut ctx = ParseContext {
-        plural_object_pronoun_ref: Some(TargetFilter::ExiledBySource),
-        ..Default::default()
-    };
-    let ast = crate::parser::oracle_effect::imperative::parse_utility_imperative_ast(
-        text, &lower, &mut ctx,
-    )
-    .expect("the clause must still parse when a typed plural antecedent exists");
-    assert!(
-        matches!(ast, UtilityImperativeAst::Attach { .. }),
-        "the typed-antecedent conjunct is what refuses; got {ast:?}"
-    );
-
-    // Counterfactual in the same test: without the antecedent the SAME clause is
-    // refused, so the assertion above cannot pass vacuously.
-    let mut bare_ctx = ParseContext::default();
-    let refused = crate::parser::oracle_effect::imperative::parse_utility_imperative_ast(
-        text,
-        &lower,
-        &mut bare_ctx,
-    )
-    .expect("the clause still parses (as the refusal variant)");
-    assert!(
-        matches!(refused, UtilityImperativeAst::AttachPluralAnaphor { .. }),
-        "without a typed antecedent the plural anaphor must be refused, got {refused:?}"
-    );
+    for (label, mut ctx) in [
+        ("bare context", ParseContext::default()),
+        (
+            "typed plural antecedent present",
+            ParseContext {
+                plural_object_pronoun_ref: Some(TargetFilter::ExiledBySource),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let ast = crate::parser::oracle_effect::imperative::parse_utility_imperative_ast(
+            text, &lower, &mut ctx,
+        )
+        .expect("the clause must still parse (as the refusal variant)");
+        assert!(
+            matches!(ast, UtilityImperativeAst::AttachPluralAnaphor { .. }),
+            "{label}: a plural attachment anaphor has no set-valued operand encoding and \
+             must be refused, got {ast:?}"
+        );
+    }
 }
 
 /// CR 115.1d + CR 608.2d: Embercleave's Equipment-ETB "attach it to **target**

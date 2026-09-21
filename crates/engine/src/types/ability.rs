@@ -9734,14 +9734,12 @@ impl TrackedAnaphorSource {
     }
 }
 
-/// CR 120.9: Grouping key for damage-history aggregation. CR 120.9 distinguishes
-/// damage dealt "by a specific source" from damage in the aggregate, so any
-/// query that needs per-source partitioning before aggregation must select a
-/// key here. Two axes exist: `SourceId` (which participant dealt the damage) and
-/// `Target` (which participant received it); both partition the same record
-/// stream, and the selected `AggregateFunction` is applied across the per-group
-/// sums (`Max` is the existential reading, `Sum` collapses to the ungrouped
-/// total).
+/// Grouping key for damage-history aggregation. Two axes exist: `SourceId`
+/// (CR 120.9 — damage dealt "by a specific source", the per-source reading) and
+/// `Target` (CR 603.4 — the per-recipient existential reading of "a player was
+/// dealt N or more damage this turn"). Both partition the same record stream,
+/// and the selected `AggregateFunction` is applied across the per-group sums
+/// (`Max` is the existential reading, `Sum` collapses to the ungrouped total).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DamageGroupKey {
     /// CR 120.9: Group records by `DamageRecord::source_id` so the resolver can
@@ -9755,9 +9753,10 @@ pub enum DamageGroupKey {
     /// intervening-if is evaluated against every recipient of the turn's damage
     /// (CR 603.4), never against the sum across recipients.
     ///
-    /// Mirrors `SourceId`'s partitioning on the recipient axis (CR 120.9's
-    /// grouping family — the same record stream partition, keyed by the other
-    /// participant). `Max` over the per-recipient sums is the existential test;
+    /// Mirrors `SourceId`'s partitioning on the recipient axis (the same record
+    /// stream partition, keyed by the other participant; the authority for the
+    /// recipient axis is CR 603.4, not CR 120.9, which is source-scoped).
+    /// `Max` over the per-recipient sums is the existential test;
     /// `Sum` over them equals the ungrouped total, so `Some(Target) + Sum` and
     /// `None` coincide.
     ///

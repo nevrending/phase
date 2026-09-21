@@ -6849,13 +6849,15 @@ pub(super) fn parse_utility_imperative_ast(
             // the chain publishes that set as typed provenance yet (see
             // `parse_plural_attachment_anaphor`). Refuse the whole instruction so
             // coverage reports it honestly instead of binding the singular
-            // `ParentTarget` fallback to the wrong object. `plural_object_pronoun_ref`
-            // is the one typed antecedent the parse context can carry (the linked-exile
-            // pool); when it is present the phrase is NOT unrepresented, so the guard
-            // steps aside for the legacy singular path.
-            if ctx.plural_object_pronoun_ref.is_none()
-                && parse_plural_attachment_anaphor(&attachment_text).is_ok()
-            {
+            // `ParentTarget` fallback to the wrong object.
+            //
+            // UNCONDITIONAL on purpose: `ParseContext::plural_object_pronoun_ref`
+            // carries the linked-exile pool for QUANTITY references, but nothing
+            // consumes it into an attachment OPERAND — `parse_attachment_anaphor`
+            // ignores it and would still bind the singular `ParentTarget`, which is
+            // exactly the wrong-operand shape this guard exists to prevent. The
+            // refusal therefore stands until a set-valued attachment operand exists.
+            if parse_plural_attachment_anaphor(&attachment_text).is_ok() {
                 return Some(UtilityImperativeAst::AttachPluralAnaphor {
                     fragment: text.to_string(),
                 });

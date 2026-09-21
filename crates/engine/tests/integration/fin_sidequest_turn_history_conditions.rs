@@ -1691,8 +1691,9 @@ fn fumble_plural_attachment_anaphor_is_unsupported() {
     assert_eq!(runner.state().objects[&equipment].controller, P1);
 
     // The refused attach clause declares no host slot, so the ONLY announced
-    // target is the bounce target. Supplying a second target here would fail the
-    // cast, which is itself the parse-level evidence that the clause is gone.
+    // target is the bounce target: under-supplying a target here would panic if
+    // the attach clause still claimed a host slot, which is the parse-level
+    // evidence that the clause is gone.
     let outcome = runner.cast(fumble).target_objects(&[victim]).resolve();
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),

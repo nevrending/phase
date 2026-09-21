@@ -335,6 +335,53 @@ fn ardenn_host_matching_the_attachment_filter_is_not_consumed_as_the_operand() {
     );
 }
 
+/// CR 107.1c: "any number" includes zero — DECLINING Beatrix's parked attachment
+/// choice attaches NOTHING. The parked choice must not fall back to the first
+/// eligible object when the answer is an empty set.
+#[test]
+fn beatrix_declining_the_any_number_choice_attaches_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Beatrix, Loyal General", 2, 2, BEATRIX)
+        .id();
+    let host = scenario.add_creature(P0, "Host Bear", 2, 2).id();
+    let equipment_a = equipment(&mut scenario, "Sword A");
+    let mut runner = scenario.build();
+
+    runner.advance_to_phase(Phase::BeginCombat);
+
+    let mut targets: Vec<ObjectId> = vec![host];
+    let mut attach_choices: Vec<ObjectId> = Vec::new();
+    drive(&mut runner, &mut targets, &mut attach_choices, |runner| {
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice {
+                effect_kind: EffectKind::Attach,
+                ..
+            }
+        )
+    });
+    runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("declining an any-number attachment choice must be legal");
+    drive(&mut runner, &mut targets, &mut attach_choices, |runner| {
+        runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+    });
+
+    assert_eq!(
+        runner.state().objects[&equipment_a].attached_to,
+        None,
+        "declining \"any number\" must attach nothing (CR 107.1c)"
+    );
+    assert!(
+        runner.state().objects[&host].attachments.is_empty(),
+        "the announced host must receive nothing, got {:?}",
+        runner.state().objects[&host].attachments
+    );
+}
+
 /// Paired positive control: a PRINTED-target attachment (Brass Squire) still
 /// announces both roles, and its attach lands. This is the unchanged
 /// counterpart that proves the new per-role gate is not a blanket demotion.

@@ -620,7 +620,8 @@ pub fn synthesize_fortify(face: &mut CardFace) {
                             target: TargetFilter::Typed(
                                 TypedFilter::land().controller(ControllerRef::You),
                             ),
-                            // CR 702.66a: fortify — same determined-attachment shape.
+                            // CR 702.67a: fortify — the keyword's "target" names the host (the
+                            // fortified land); the attachment ("this Fortification") is determined.
                             selection: AttachSelection::AtResolution {
                                 count: AttachCardinality::One,
                             },
