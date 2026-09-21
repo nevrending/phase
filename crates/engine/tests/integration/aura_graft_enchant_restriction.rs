@@ -107,6 +107,7 @@ fn build_aura_graft(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
         Effect::Attach {
             attachment: TargetFilter::ParentTarget,
             target: TargetFilter::Typed(TypedFilter::permanent()),
+            selection: engine::types::ability::AttachSelection::Targeted,
         },
         vec![],
         source,
@@ -199,6 +200,7 @@ fn aura_graft_restricts_host_to_enchantable_and_blocks_illegal_move_cr_702_5a() 
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::Typed(TypedFilter::permanent()),
+            selection: engine::types::ability::AttachSelection::Targeted,
         },
         vec![TargetRef::Object(illegal_artifact)],
         aura,
@@ -268,6 +270,7 @@ fn aura_graft_no_enchant_keyword_offers_any_host_cr_702_5a() {
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::Typed(TypedFilter::permanent()),
+            selection: engine::types::ability::AttachSelection::Targeted,
         },
         vec![TargetRef::Object(artifact)],
         aura,
@@ -523,6 +526,7 @@ fn described_host_attach_with_no_attachment_is_a_silent_noop() {
         Effect::Attach {
             attachment: TargetFilter::ParentTarget,
             target: TargetFilter::Typed(TypedFilter::permanent()),
+            selection: engine::types::ability::AttachSelection::Targeted,
         },
         // No declared targets: the `ParentTarget` attachment cascade has nothing
         // to read (no trigger event, no bound attachment target).

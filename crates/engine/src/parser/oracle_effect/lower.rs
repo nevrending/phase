@@ -1948,21 +1948,28 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         // guard below (their printed clause says "target creature you control"), and
         // the invincible iron man (a ParentTarget host) matches neither arm.
         //
-        // PLURAL-ANAPHOR BOUNDARY (maintainer fallback): a plural attachment
-        // anaphor ("attach them/those …") names a SET with no typed provenance —
-        // `GainControlAll` publishes no tracked set, so `resolve_attachment_ids`'
-        // ParentTarget tier would fall back to the ability's declared target and
-        // pair the host choice with a rules-incorrect operand (Fumble: the bounced
-        // creature). Such a clause keeps its pre-existing Stack treatment until the
-        // provenance follow-up lands. A SINGLE-operand anaphor ("it", "this
-        // Equipment") names a determined operand and stays promoted.
-        Effect::Attach { attachment, target }
-            if attachment.is_context_ref()
-                && crate::game::ability_utils::attach_host_filter_needs_target_slot(target)
-                && target.denotes_battlefield_objects()
-                && nom_primitives::scan_contains(&lower, "attach ")
-                && !nom_primitives::scan_contains(&lower, "attach them ")
-                && !nom_primitives::scan_contains(&lower, "attach those ") =>
+        // PLURAL-ANAPHOR BOUNDARY: a plural attachment anaphor ("attach
+        // them/those …") never reaches this arm — `parse_utility_imperative_ast`'s
+        // explicit-targeted arm lowers it to
+        // `Effect::unimplemented("plural_attachment_anaphor")` before any
+        // `Effect::Attach` exists. Every measured plural-anaphor attachment
+        // clause THAT REACHES THE EFFECT PARSER (Fumble, Helm of Kaldra) lowers
+        // through that arm; Outfitted Jouster's tail is swallowed upstream by its
+        // conjure clause and never becomes a clause at all (its own defect). The
+        // sibling fallback arms cannot match a plural anaphor phrase either: the
+        // token arm lists only singular anaphors and the Cass/Zack-Fair arm
+        // requires the literal `equipment that was/were attached to`. The
+        // promoted arm below is therefore total over `Effect::Attach`. A
+        // SINGLE-operand anaphor ("it", "this Equipment") names a determined
+        // operand and stays promoted.
+        Effect::Attach {
+            attachment,
+            target,
+            selection: _,
+        } if attachment.is_context_ref()
+            && crate::game::ability_utils::attach_host_filter_needs_target_slot(target)
+            && target.denotes_battlefield_objects()
+            && nom_primitives::scan_contains(&lower, "attach ") =>
         {
             true
         }
@@ -3010,7 +3017,10 @@ pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
 pub(super) fn rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card(
     effect: &mut Effect,
 ) -> bool {
-    let Effect::Attach { attachment, target } = effect else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = effect
+    else {
         return false;
     };
     // Hoisted so the operand-identity test below can never fire for a
@@ -4445,6 +4455,7 @@ pub(super) fn rewrite_parent_target_to_last_created(
         Effect::Attach {
             attachment,
             target,
+            selection: _,
         } => {
             if token_is_attachable
                 && matches!(

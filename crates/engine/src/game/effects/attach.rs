@@ -4,8 +4,9 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
-    AbilityCondition, Effect, EffectError, EffectKind, FilterProp, MultiTargetSpec, QuantityExpr,
-    ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
+    AbilityCondition, AttachSelection, Effect, EffectError, EffectKind, FilterProp,
+    MultiTargetSpec, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -161,7 +162,14 @@ fn resolve_attachment_ids<'a>(
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
             .into_iter()
             .collect()
-    } else if attachment_filter_uses_explicit_target_slot(attachment_filter) {
+    } else if crate::game::ability_utils::attach_attachment_claims_announcement_slot(
+        attachment_filter,
+        &attach_selection(ability),
+    ) {
+        // CR 115.1a/c/d/e: only a printed-target attachment operand may take a
+        // declared slot out of `target_slots`. A described (`AtResolution`)
+        // operand resolves through the tier above (its bound resolution choice)
+        // or the final battlefield-scan tier — never from the announced host.
         resolve_bound_attachment_target(state, ability, attachment_filter)
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
             .into_iter()
@@ -183,7 +191,9 @@ fn resolve_bound_attachment_operation(
 ) -> Result<AttachResolutionOutcome, EffectError> {
     let source_id = ability.source_id;
     let (attachment_filter, target_filter) = match &ability.effect {
-        Effect::Attach { attachment, target } => (attachment, target),
+        Effect::Attach {
+            attachment, target, ..
+        } => (attachment, target),
         _ => (&TargetFilter::SelfRef, &TargetFilter::Any),
     };
 
@@ -627,7 +637,16 @@ fn prompt_resolution_attachment_choice(
     if !attachment_filter_uses_explicit_target_slot(attachment_filter) {
         return Ok(AttachPromptOutcome::Execute);
     }
-    if explicit_attachment_target_chosen(state, ability, attachment_filter) {
+    // CR 115.1a/c/d/e + CR 608.2d: only a PRINTED-target attachment operand may be
+    // satisfied by a declared target slot. A described (`AtResolution`) operand is
+    // chosen while the effect resolves and must never be read out of the announced
+    // target set — even when the announced HOST itself matches the attachment
+    // filter (an Equipment-creature host for Beatrix, an Aura/Equipment host
+    // permanent for Ardenn). Without this gate the shortcut fires, no prompt is
+    // created, and the host is consumed as the attachment operand.
+    if attach_selection(ability).is_targeted()
+        && explicit_attachment_target_chosen(state, ability, attachment_filter)
+    {
         return Ok(AttachPromptOutcome::Execute);
     }
 
@@ -1070,6 +1089,32 @@ fn attachment_choice_bounds(
     ability: &ResolvedAbility,
     eligible_count: usize,
 ) -> Result<MultiTargetBounds, EffectError> {
+    // CR 107.1c + CR 608.2d: a DESCRIBED attachment operand carries its printed
+    // cardinality on the effect (`AttachSelection::AtResolution { count }`),
+    // because `clause.multi_target` is the announced-target count and must stay
+    // empty for a described choice. `All` maps to the legacy single-choice bounds
+    // (documented gap), and the zero-eligible short-circuit is required for the
+    // `One`/`UpTo` forms, whose min is >= 1 — `resolve_multi_target_bounds`
+    // errors when `legal < min` (CR 608.2d: no illegal or impossible option).
+    //
+    // Deliberately not taken for a forwarded-candidate operation
+    // (`attach_attachment_candidates` non-empty): those shapes carry their own
+    // `multi_target`/`optional_targeting` bounds and never reach a described
+    // count today.
+    if ability.attach_attachment_candidates().is_empty() {
+        if let Effect::Attach {
+            selection: AttachSelection::AtResolution { count },
+            ..
+        } = &ability.effect
+        {
+            if eligible_count == 0 {
+                return Ok(MultiTargetBounds { min: 0, max: 0 });
+            }
+            let spec = count.to_multi_target_spec();
+            return resolve_multi_target_bounds(state, ability, &spec, eligible_count)
+                .map_err(|error| EffectError::InvalidParam(error.to_string()));
+        }
+    }
     if let Some(spec) = &ability.multi_target {
         return resolve_multi_target_bounds(state, ability, spec, eligible_count)
             .map_err(|error| EffectError::InvalidParam(error.to_string()));
@@ -1130,7 +1175,9 @@ pub(crate) fn bind_resolution_attachment_choice(
     // non-panicking: an unusable answer is an `InvalidParam`.
     let rejected_hosts: Vec<ObjectId> = if selecting_host {
         match &ability.effect {
-            Effect::Attach { attachment, target } => {
+            Effect::Attach {
+                attachment, target, ..
+            } => {
                 let operand_ids = excluded_host_operand_ids(state, &ability, attachment);
                 attachment_ids
                     .iter()
@@ -1419,6 +1466,17 @@ fn resolve_parent_target_host_from_trigger(state: &GameState) -> Option<ObjectId
             ..
         } => Some(*object_id),
         _ => None,
+    }
+}
+
+/// CR 115.1a/c/d/e + CR 608.2d: the printed role of this operation's ATTACHMENT
+/// operand. Total and fail-closed: a non-`Attach` effect reads as `Targeted`, so
+/// the existing gate behavior for callers that reach here with another effect is
+/// unchanged.
+fn attach_selection(ability: &ResolvedAbility) -> AttachSelection {
+    match &ability.effect {
+        Effect::Attach { selection, .. } => selection.clone(),
+        _ => AttachSelection::Targeted,
     }
 }
 
@@ -3409,6 +3467,109 @@ mod tests {
         assert_eq!(state.objects.get(&equipment).unwrap().attached_to, None);
     }
 
+    /// CR 107.1c + CR 608.2d: the resolution-time bounds of a DESCRIBED
+    /// attachment operand follow its printed cardinality — `any number` is zero
+    /// or more (up to the live eligible count), `an`/`all` keep the legacy
+    /// single choice, and the zero-eligible case is a no-op rather than an error.
+    #[test]
+    fn described_attachment_bounds_follow_the_printed_cardinality() {
+        use crate::types::ability::{AttachCardinality, AttachSelection, TypeFilter};
+
+        let mut state = setup();
+        let seed = spawn_creature(&mut state, "Seed Bear");
+        let ability = |selection: AttachSelection| {
+            crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::Attach {
+                    attachment: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact)
+                            .subtype("Equipment".to_string())
+                            .controller(ControllerRef::You),
+                    ),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    selection,
+                },
+                vec![],
+                ObjectId(999),
+                PlayerId(0),
+            )
+        };
+        let bounds = |selection: AttachSelection, eligible: usize| {
+            attachment_choice_bounds(&state, &ability(selection), eligible)
+                .expect("described bounds must never error")
+        };
+
+        let described = |count: AttachCardinality| AttachSelection::AtResolution { count };
+
+        // CR 107.1c: "any number" is zero or more, bounded by the live population.
+        assert_eq!(
+            {
+                let b = bounds(described(AttachCardinality::AnyNumber), 3);
+                (b.min, b.max)
+            },
+            (0, 3)
+        );
+        assert_eq!(
+            {
+                let b = bounds(described(AttachCardinality::AnyNumber), 1);
+                (b.min, b.max)
+            },
+            (0, 1),
+            "one eligible object is still an optional choice (any number includes zero)"
+        );
+        assert_eq!(
+            {
+                let b = bounds(described(AttachCardinality::AnyNumber), 0);
+                (b.min, b.max)
+            },
+            (0, 0),
+            "nothing eligible means nothing to choose (CR 608.2d)"
+        );
+
+        // "an Equipment" with no eligible object must short-circuit instead of
+        // asking `resolve_multi_target_bounds` for `legal < min`.
+        assert_eq!(
+            {
+                let b = bounds(described(AttachCardinality::One), 0);
+                (b.min, b.max)
+            },
+            (0, 0)
+        );
+
+        // "all Equipment" is behavior-preserving today: the resolver serves one
+        // operand (documented gap in `AttachCardinality::All`).
+        assert_eq!(
+            {
+                let b = bounds(described(AttachCardinality::All), 3);
+                (b.min, b.max)
+            },
+            (1, 1)
+        );
+
+        // A printed-target attachment keeps the announced-slot fallbacks.
+        assert_eq!(
+            {
+                let b = bounds(AttachSelection::Targeted, 3);
+                (b.min, b.max)
+            },
+            (1, 1)
+        );
+
+        // Precedence: a forwarded-candidate operation keeps its own bounds even
+        // when the effect carries a described count (the arm is skipped).
+        let mut forwarded = ability(described(AttachCardinality::AnyNumber));
+        let candidate = ObjectIncarnationRef::from_object(
+            state.objects.get(&seed).expect("the seed creature exists"),
+        );
+        forwarded.bind_attach_attachment_candidates(vec![candidate]);
+        let b = attachment_choice_bounds(&state, &forwarded, 3)
+            .expect("forwarded bounds must not error");
+        assert_eq!(
+            (b.min, b.max),
+            (1, 1),
+            "forwarded candidate operations keep their own bounds"
+        );
+    }
+
     #[test]
     fn deferred_attach_prompts_when_multiple_equipment_match() {
         use crate::types::ability::TypeFilter;
@@ -3428,6 +3589,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3490,6 +3652,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3536,6 +3699,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3584,6 +3748,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::SelfRef,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             cloud,
@@ -3699,6 +3864,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3750,6 +3916,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3786,6 +3953,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             ObjectId(999),
@@ -3839,6 +4007,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::ParentTarget,
                     target: filter.clone(),
+                    selection: AttachSelection::Targeted,
                 },
                 vec![TargetRef::Object(equipment)],
                 ObjectId(999),
@@ -3866,6 +4035,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::ParentTarget,
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![
                 TargetRef::Object(equipment),
@@ -3907,6 +4077,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::ParentTarget,
                     target: filter.clone(),
+                    selection: AttachSelection::Targeted,
                 },
                 vec![
                     TargetRef::Object(equipment),
@@ -3956,6 +4127,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::ParentTarget,
                     target: filter.clone(),
+                    selection: AttachSelection::Targeted,
                 },
                 vec![],
                 ObjectId(999),
@@ -4007,6 +4179,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::ParentTarget,
                     target: filter.clone(),
+                    selection: AttachSelection::Targeted,
                 },
                 vec![
                     TargetRef::Object(equipment),
@@ -4062,6 +4235,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::ParentTarget,
                     target: filter.clone(),
+                    selection: AttachSelection::Targeted,
                 },
                 vec![TargetRef::Object(equipment)],
                 ObjectId(999),
@@ -4099,6 +4273,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::ParentTarget,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             equipment,
@@ -4137,6 +4312,7 @@ mod tests {
                 crate::types::ability::Effect::Attach {
                     attachment: attachment_filter.clone(),
                     target,
+                    selection: AttachSelection::Targeted,
                 },
                 vec![],
                 ObjectId(999),
@@ -4200,6 +4376,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             // Parent chain walkers can propagate the LastCreated bearer into
             // `targets` before the Equipment pick is appended at resolution.
@@ -4231,6 +4408,7 @@ mod tests {
             crate::types::ability::Effect::Attach {
                 attachment: filter.clone(),
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             Vec::new(),
             ObjectId(999),
@@ -4289,6 +4467,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::LastZoneChanged,
+                selection: AttachSelection::Targeted,
             },
             Vec::new(),
             ObjectId(999),
@@ -4330,6 +4509,7 @@ mod tests {
                 target: TargetFilter::Typed(
                     TypedFilter::creature().properties(vec![FilterProp::Another]),
                 ),
+                selection: AttachSelection::Targeted,
             },
             vec![TargetRef::Object(attachment)],
             ObjectId(999),
@@ -4372,6 +4552,7 @@ mod tests {
             crate::types::ability::Effect::Attach {
                 attachment: TargetFilter::ParentTarget,
                 target: TargetFilter::Any,
+                selection: AttachSelection::Targeted,
             },
             vec![TargetRef::Object(attachment)],
             ObjectId(999),
@@ -4465,6 +4646,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: host_filter.clone(),
+                selection: AttachSelection::Targeted,
             },
             Vec::new(),
             ObjectId(999),
@@ -4579,6 +4761,7 @@ mod tests {
             crate::types::ability::Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![], // No explicit targets — should fall back to LastCreated
             equipment_id,
@@ -4620,6 +4803,7 @@ mod tests {
             crate::types::ability::Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::LastCreated,
+                selection: AttachSelection::Targeted,
             },
             vec![crate::types::ability::TargetRef::Object(creature_a)],
             equipment_id,
@@ -4647,6 +4831,7 @@ mod tests {
             crate::types::ability::Effect::Attach {
                 attachment: TargetFilter::Any,
                 target: TargetFilter::Any,
+                selection: AttachSelection::Targeted,
             },
             vec![
                 crate::types::ability::TargetRef::Object(equipment_id),
@@ -4926,6 +5111,7 @@ mod tests {
                         .properties(vec![FilterProp::AttachedToSource]),
                 ),
                 target: TargetFilter::ParentTarget,
+                selection: AttachSelection::Targeted,
             },
             vec![crate::types::ability::TargetRef::Object(bearer)],
             zack,
@@ -4975,6 +5161,7 @@ mod tests {
                         .properties(vec![FilterProp::AttachedToSource]),
                 ),
                 target: TargetFilter::ParentTarget,
+                selection: AttachSelection::Targeted,
             },
             vec![TargetRef::Object(bearer)],
             zack,

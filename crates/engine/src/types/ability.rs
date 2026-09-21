@@ -14739,6 +14739,90 @@ impl BounceSelection {
     }
 }
 
+/// CR 115.1a / CR 115.1c / CR 115.1d / CR 115.1e: whether the ATTACHMENT
+/// operand of an [`Effect::Attach`] instruction is a PRINTED TARGET (announced
+/// with the spell/ability, CR 601.2c / CR 602.2b / CR 603.3d) or a DESCRIBED
+/// choice made while the effect resolves (CR 608.2d).
+///
+/// The distinction is per ROLE, not per ability: a mixed instruction can print
+/// "target" for one operand only — `"attach any number of Equipment you control
+/// to target creature you control"` (Beatrix, Loyal General; Ardenn, Intrepid
+/// Archaeologist) announces the creature and chooses the Equipment as the
+/// effect resolves. The HOST operand's timing stays the ability-level
+/// `TargetChoiceTiming`; this field carries the ATTACHMENT operand's.
+///
+/// Determined operands (`SelfRef` / context references — the `Equip {N}`
+/// keyword class) carry `AtResolution { count: One }`: they are not printed
+/// targets, and they claim no announcement slot through the filter-shape
+/// conjunct (`attach_attachment_filter_needs_target_slot`), so the choice here
+/// is behavior-neutral but truthful.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachSelection {
+    /// Default — the printed text names the attachment with "target …", so it is
+    /// announced with the spell or ability (CR 115.1a/c/d/e). Pre-field
+    /// card-data deserializes here, preserving its announcement behavior.
+    #[default]
+    Targeted,
+    /// CR 608.2d: the printed text DESCRIBES the attachment without "target"
+    /// ("an Equipment you control", "any number of Equipment you control",
+    /// "attach this permanent"), so any player choice among the described
+    /// population is made while the effect resolves.
+    AtResolution {
+        #[serde(default, skip_serializing_if = "AttachCardinality::is_one")]
+        count: AttachCardinality,
+    },
+}
+
+impl AttachSelection {
+    /// Helper for `#[serde(skip_serializing_if = ...)]`.
+    pub fn is_targeted(&self) -> bool {
+        matches!(self, Self::Targeted)
+    }
+}
+
+/// CR 107.1c + CR 608.2d: the printed cardinality of a DESCRIBED attachment
+/// operand — how many objects the resolving choice may pick.
+///
+/// `AnyNumber` follows CR 107.1c ("any number" includes zero); `UpTo(N)` is the
+/// "up to N" form; `All` is a DETERMINED set ("attach all Equipment you
+/// control") that has no player choice at all. The engine's attachment resolver
+/// serves one operand today, so `All` maps to the legacy single-choice bounds
+/// and is recorded here so the enumeration follow-up has a typed seam.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachCardinality {
+    /// "an <object>" / "a <object>" / a determined operand — exactly one.
+    #[default]
+    One,
+    /// "up to N <objects>" — zero to N.
+    UpTo(QuantityExpr),
+    /// CR 107.1c: "any number of <objects>" — zero or more.
+    AnyNumber,
+    /// "all <objects>" — every matching object (a determined set; the resolver's
+    /// single-operand limitation is recorded, not modelled, for now).
+    All,
+}
+
+impl AttachCardinality {
+    /// Helper for `#[serde(skip_serializing_if = ...)]`.
+    pub fn is_one(&self) -> bool {
+        matches!(self, Self::One)
+    }
+
+    /// CR 107.1c + CR 608.2d: the target-count bounds this printed cardinality
+    /// imposes on the resolution-time attachment choice. `All` maps to the
+    /// legacy single-choice bounds (documented gap: the resolver serves one
+    /// operand; see the enum doc).
+    pub fn to_multi_target_spec(&self) -> MultiTargetSpec {
+        match self {
+            Self::One | Self::All => MultiTargetSpec::fixed(1, 1),
+            Self::UpTo(max) => MultiTargetSpec::up_to(max.clone()),
+            Self::AnyNumber => MultiTargetSpec::unlimited(0),
+        }
+    }
+}
+
 /// CR 708.2a: Whether a face-down permanent is a creature or a non-creature.
 ///
 /// CR 708.2a sentence 1 gives the manifest/morph default: a face-down permanent
@@ -15962,6 +16046,14 @@ pub enum Effect {
         attachment: TargetFilter,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 115.1a/c/d/e + CR 608.2d: when the ATTACHMENT operand is chosen.
+        /// `Targeted` = printed "target …", announced with the ability;
+        /// `AtResolution { count }` = a described choice made while the effect
+        /// resolves. The HOST operand's timing stays the ability-level
+        /// `AbilityDefinition::target_choice_timing`. Defaults to `Targeted` so
+        /// card-data written before this field keeps its announcement behavior.
+        #[serde(default, skip_serializing_if = "AttachSelection::is_targeted")]
+        selection: AttachSelection,
     },
     /// CR 701.3d: Unattach every matching Equipment from a matched host while
     /// leaving that Equipment on the battlefield. `attachment` scopes which

@@ -34,7 +34,9 @@
 //!
 //! Runtime rows cover both halves of the class: the U4 per-recipient damage
 //! threshold (R7–R9) and the U5 resolution-time described attach host (R10–R13),
-//! including the moved-card cascade (R13, Stonehewer Giant).
+//! including the moved-card cascade (R13, Stonehewer Giant). The Fumble row
+//! pins the honest-unsupported outcome for the plural-anaphor attachment
+//! operand (CR 608.2c + CR 400.7) on the real cast pipeline.
 //!
 //! Negative rows are paired with positive reach-guards: every "does not fire" /
 //! "not attached" assertion is preceded by a proof that the path was reached
@@ -171,7 +173,9 @@ fn play_blitzball_parse_carries_combat_condition_and_self_ref_attach() {
         .as_ref()
         .expect("the transform must chain the \"then attach it\" sub-ability");
     match &*sub.effect {
-        Effect::Attach { attachment, target } => {
+        Effect::Attach {
+            attachment, target, ..
+        } => {
             assert_eq!(
                 *attachment,
                 TargetFilter::SelfRef,
@@ -1618,58 +1622,34 @@ fn stonehewer_giant_searched_equipment_attaches_to_the_sole_host() {
 }
 
 // ===========================================================================
-// LOW-2 — the multi-attachment described-host class (Fumble)
+// Fumble — the plural-anaphor attachment is honestly unsupported
 // ===========================================================================
 
 /// Verbatim Oracle text (Scryfall / the local export).
 const FUMBLE: &str = "Return target creature to its owner's hand. Gain control of all Auras and Equipment that were attached to it, then attach them to another creature.";
 
-/// CR 115.1a + CR 608.2d + CR 609.3 + CR 701.3b (ACCEPTED DECISION): Fumble's
-/// "then attach them to another creature" is a PLURAL-ANAPHOR Attach whose
-/// INTENDED attachment set is the Auras/Equipment the previous instruction
-/// gained control of. `GainControlAll` does not publish that set as a typed
-/// attachment candidate set — the provenance follow-up — so the intended set is
-/// never re-homed: the Aura stays unattached and leaves play via the
-/// unattached-Aura state-based action (CR 704.5m), the Equipment stays
-/// unattached on the battlefield (CR 704.5n), the bounce and the control change
-/// still resolve, and no error surfaces.
-/// `described_host_attach_with_no_attachment_is_a_silent_noop` (the
-/// direct-constructed attachment-empty row) pins the same no-op shape.
+/// CR 608.2c (rules of English — number agreement) + CR 400.7 (maintainer
+/// finding, honest-coverage option): Fumble's "then attach them to another
+/// creature" is a PLURAL-ANAPHOR Attach whose INTENDED attachment set is the
+/// Auras/Equipment the previous instruction gained control of. `GainControlAll`
+/// publishes no typed set and `TargetFilter` has no set-valued anaphor, so the
+/// clause is REFUSED at parse time
+/// (`Effect::unimplemented("plural_attachment_anaphor")`) and the card reports
+/// as unsupported — an honest gap instead of an attach bound to the wrong
+/// object.
 ///
-/// TIMING BOUNDARY: the clause is EXPLICITLY EXCLUDED from the resolution-time
-/// promoted class by the tested plural-anaphor boundary in
-/// `oracle_effect::lower::target_choice_timing_for_clause` (the fragment prints
-/// "attach them "), so the host is a declared target again and this row drives
-/// it through the announcement-time target queue. A single-operand anaphor
-/// ("attach it to a creature you control" — Play Blitzball, Aura Graft,
-/// Stonehewer Giant) stays promoted; the boundary is what keeps the promoted
-/// class from pairing a host choice with a rules-incorrect operand.
+/// The coverage-level honesty is pinned in
+/// `attach_plural_anaphor_coverage_honesty.rs`; this row is the runtime
+/// companion proving that the two MODELLED clauses in front of the refusal
+/// still resolve through the real cast pipeline, and that the refused clause
+/// contributes nothing.
 ///
-/// DISCLOSED PRE-EXISTING GAP: the intended set is never re-homed, so the
-/// instruction is a no-op. Its attachment operand is the plural anaphor "them",
-/// which the parser encodes as `TargetFilter::ParentTarget`; the plural
-/// antecedent has no typed encoding in the AST (`ParentTarget` is singular), so
-/// the fix is the provenance follow-up: a "the set this instruction gained
-/// control of" context reference with `GainControlAll` publishing that set to
-/// `Effect::Attach`. The corpus class is narrow: of 35,977 cards, only Fumble
-/// reaches the promoted class; the corpus's other two plural-anaphor clauses
-/// (Outfitted Jouster's "attach them to Outfitted Jouster" — a conjured set with
-/// a `SelfRef` host; Helm of Kaldra's "Attach those Equipment to it." — an `Any`
-/// attachment) were never promoted.
-///
-/// MEASURED STACK-TIMED OUTCOME (what the lock below pins): with the host slot
-/// declared again, the slot is used as BOTH the attachment operand and the host
-/// (`attachment_ids == [host]`, `target_id == host`), so the instruction
-/// self-attaches and CR 701.3b makes it a no-op — nothing is attached anywhere.
-/// The promoted path's bogus bounced-creature→host pair does NOT occur here: it
-/// arose from resolving the attachment operand off the propagated parent target
-/// while the described host came from the prompt.
-///
-/// NAME: renamed from `fumble_multi_attachment_attach_is_a_silent_noop` — the
-/// attach instruction is not a silent no-op (see the gap note above); only the
-/// INTENDED attachment set is never re-homed.
+/// MEASURED RUNTIME OUTCOME: the bounce and the control change resolve; nothing
+/// is newly attached; the host-less Aura leaves play via the unattached-Aura
+/// state-based action (CR 704.5m) and the Equipment stays on the battlefield,
+/// merely unattached (CR 704.5n).
 #[test]
-fn fumble_gained_attachment_set_is_not_rehomed() {
+fn fumble_plural_attachment_anaphor_is_unsupported() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let victim = scenario.add_creature(P1, "Fumble Target", 2, 2).id();
@@ -1710,13 +1690,10 @@ fn fumble_gained_attachment_set_is_not_rehomed() {
     assert_eq!(runner.state().objects[&aura].controller, P1);
     assert_eq!(runner.state().objects[&equipment].controller, P1);
 
-    // The plural-anaphor boundary keeps this clause Stack-timed, so the host is
-    // a declared target chosen at announcement: the target queue is
-    // [the bounce target, the attach host].
-    let outcome = runner
-        .cast(fumble)
-        .target_objects(&[victim, other])
-        .resolve();
+    // The refused attach clause declares no host slot, so the ONLY announced
+    // target is the bounce target. Supplying a second target here would fail the
+    // cast, which is itself the parse-level evidence that the clause is gone.
+    let outcome = runner.cast(fumble).target_objects(&[victim]).resolve();
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "the spell must resolve to a quiet priority window — no error, no prompt: {:?}",
@@ -1735,19 +1712,18 @@ fn fumble_gained_attachment_set_is_not_rehomed() {
         "control of the attached Equipment is gained"
     );
 
-    // The accepted no-op: nothing was NEWLY attached. The Equipment is merely
-    // unattached (CR 704.5n) and the host-less Aura left play via the
-    // unattached-Aura state-based action (CR 704.5m) because the attach
-    // instruction could not re-home it.
+    // The refused clause contributes nothing: nothing was NEWLY attached. The
+    // Equipment is merely unattached (CR 704.5n) and the host-less Aura left
+    // play via the unattached-Aura state-based action (CR 704.5m).
     assert_eq!(
         runner.state().objects[&equipment].attached_to,
         None,
-        "the Equipment is not attached to anything after the no-op"
+        "the Equipment is not attached to anything"
     );
     assert_eq!(
         runner.state().objects[&aura].attached_to,
         None,
-        "the Aura is not attached to anything after the no-op"
+        "the Aura is not attached to anything"
     );
     assert_eq!(
         runner.state().objects[&aura].zone,
@@ -1758,29 +1734,11 @@ fn fumble_gained_attachment_set_is_not_rehomed() {
         !runner.state().objects[&other]
             .attachments
             .contains(&equipment),
-        "the other creature must not receive the Equipment"
+        "the bystander creature must not receive the Equipment"
     );
     assert!(
         !runner.state().objects[&other].attachments.contains(&aura),
-        "the other creature must not receive the Aura"
-    );
-    // KNOWN-BAD LOCK (MEASURED; the review expected the promoted path's
-    // `victim → other` pair to persist here — it does not, see the row doc): the
-    // declared host slot is used as both the attachment operand and the host, so
-    // the instruction self-attaches and CR 701.3b makes it a no-op. Nothing is
-    // attached anywhere, and the intended set is never re-homed. The host-
-    // emptiness half inverts when the provenance follow-up re-homes the gained
-    // set; the victim half stays true and guards against the bogus pair
-    // returning.
-    assert_eq!(
-        runner.state().objects[&victim].attached_to,
-        None,
-        "KNOWN-BAD (no-op): the bounced creature is not attached to anything"
-    );
-    assert!(
-        runner.state().objects[&other].attachments.is_empty(),
-        "KNOWN-BAD (no-op): the candidate host received nothing, got {:?}",
-        runner.state().objects[&other].attachments
+        "the bystander creature must not receive the Aura"
     );
     // Reach-guard (CR 704.5n: an Equipment stays in play when its host leaves):
     // the Equipment must still be on the battlefield, otherwise the two guards
