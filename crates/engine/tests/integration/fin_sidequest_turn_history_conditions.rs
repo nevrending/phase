@@ -697,6 +697,10 @@ fn play_blitzball_six_noncombat_damage_does_not_fire() {
 /// back face, and optional pre-seeded non-token Treasures. Returns
 /// (runner, sidequest, victim).
 ///
+/// `victim_controller` optionally DIVERGES the Victim's controller from its
+/// owner (`CardBuilder::controlled_by`, battlefield-only) so the condition's
+/// controller axis can be told apart from an owner-based matcher.
+///
 /// The donor supplies the back face only to make `back_face.is_some()` true, so
 /// the "Then if you control three or more Treasures" transform is a LIVE
 /// possibility rather than a disabled one. The face's identity is irrelevant to
@@ -704,6 +708,7 @@ fn play_blitzball_six_noncombat_damage_does_not_fire() {
 /// face is Yiazmat, Ultimate Mark.
 fn hunt_the_mark_board(
     victim_owner: PlayerId,
+    victim_controller: Option<PlayerId>,
     seeded_treasures: usize,
 ) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
@@ -711,7 +716,11 @@ fn hunt_the_mark_board(
     let sidequest = scenario
         .add_enchantment_from_oracle(P0, "Sidequest: Hunt the Mark", HUNT_THE_MARK)
         .id();
-    let victim = scenario.add_creature(victim_owner, "Victim", 2, 2).id();
+    let mut victim_builder = scenario.add_creature(victim_owner, "Victim", 2, 2);
+    if let Some(controller) = victim_controller {
+        victim_builder.controlled_by(controller);
+    }
+    let victim = victim_builder.id();
     let donor = scenario
         .add_artifact_from_oracle(P1, "World Champion, Celestial Weapon", WORLD_CHAMPION)
         .with_subtypes(vec!["Equipment"])
@@ -727,6 +736,17 @@ fn hunt_the_mark_board(
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let mut runner = scenario.build();
+    if let Some(controller) = victim_controller {
+        // CR 108.4a + CR 400.7 + `reset_for_battlefield_exit`: the divergence is a
+        // BATTLEFIELD state — once the Victim dies its controller reverts to its
+        // owner — so it is asserted here rather than in the rows, which read the
+        // graveyard card.
+        assert_eq!(
+            runner.state().objects[&victim].controller,
+            controller,
+            "reach-guard: the Victim's controller diverges from its owner on the battlefield"
+        );
+    }
     inject_back_face(&mut runner, sidequest, donor);
     runner.cast(destroy).target_object(victim).resolve();
     (runner, sidequest, victim)
@@ -738,7 +758,7 @@ fn hunt_the_mark_board(
 /// live possibility rather than a disabled transform.
 #[test]
 fn hunt_the_mark_opponent_creature_death_creates_treasure() {
-    let (mut runner, sidequest, victim) = hunt_the_mark_board(P1, 0);
+    let (mut runner, sidequest, victim) = hunt_the_mark_board(P1, None, 0);
 
     let mut targets = Vec::new();
     drive(&mut runner, &mut targets, &mut Vec::new(), |r| {
@@ -777,7 +797,7 @@ fn hunt_the_mark_opponent_creature_death_creates_treasure() {
 /// the graveyard.
 #[test]
 fn hunt_the_mark_own_creature_death_creates_no_treasure() {
-    let (mut runner, _sidequest, victim) = hunt_the_mark_board(P0, 0);
+    let (mut runner, _sidequest, victim) = hunt_the_mark_board(P0, None, 0);
 
     let mut targets = Vec::new();
     drive(&mut runner, &mut targets, &mut Vec::new(), |r| {
@@ -796,6 +816,99 @@ fn hunt_the_mark_own_creature_death_creates_no_treasure() {
     );
 }
 
+/// R4b: the CONTROLLER axis with a DIVERGENT owner — a P0-owned creature
+/// controlled by P1 dies this turn → the condition's `controller: Opponent`
+/// matches the event-time CONTROLLER, so the end-step trigger CREATES the
+/// Treasure. An owner-based matcher would read the P0 owner as "you" and skip
+/// the Treasure, so this row fails if the condition's axis is really ownership.
+/// Reach-guards: the creature died (graveyard) with the divergent controller,
+/// and the end-step window was reached.
+#[test]
+fn hunt_the_mark_opponent_controlled_creature_death_creates_treasure() {
+    let (mut runner, sidequest, victim) = hunt_the_mark_board(P0, Some(P1), 0);
+
+    let mut targets = Vec::new();
+    drive(&mut runner, &mut targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::End)
+    });
+
+    assert_eq!(
+        runner.state().objects[&victim].owner,
+        P0,
+        "reach-guard: the creature is OWNED by the sidequest's controller"
+    );
+    // CR 108.4a + CR 400.7 + `reset_for_battlefield_exit`: the pre-death divergence
+    // (P1-controlled) was asserted in the helper; once the creature leaves the
+    // battlefield its controller reverts to its owner.
+    assert_eq!(
+        runner.state().objects[&victim].controller,
+        P0,
+        "CR 108.4a + CR 400.7: the graveyard card's controller is its owner again"
+    );
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Graveyard,
+        "reach-guard: the destroyed creature died (CR 700.4)"
+    );
+    assert_eq!(
+        runner.state().phase,
+        Phase::End,
+        "the row's window was the end step"
+    );
+    assert_eq!(
+        treasure_token_count(&runner, P0),
+        1,
+        "CR 603.4 + CR 608.2h: the event-time CONTROLLER was the opponent → one Treasure"
+    );
+    assert!(
+        !runner.state().objects[&sidequest].transformed,
+        "1 Treasure < 3 → the conditional transform does not resolve"
+    );
+}
+
+/// R5b: the mirror divergence — a P1-owned creature controlled by P0 dies this
+/// turn → NO Treasure, because the death was under YOUR control even though the
+/// owner is the opponent. Pairs with R4b: together they pin the controller axis
+/// in both directions against an owner-based matcher.
+#[test]
+fn hunt_the_mark_opponent_owned_creature_under_your_control_creates_no_treasure() {
+    let (mut runner, _sidequest, victim) = hunt_the_mark_board(P1, Some(P0), 0);
+
+    let mut targets = Vec::new();
+    drive(&mut runner, &mut targets, &mut Vec::new(), |r| {
+        at_phase_quiet(r, Phase::End)
+    });
+
+    assert_eq!(
+        runner.state().objects[&victim].owner,
+        P1,
+        "reach-guard: the creature is OWNED by the opponent"
+    );
+    // CR 108.4a + CR 400.7 + `reset_for_battlefield_exit`: the pre-death divergence
+    // (P0-controlled) was asserted in the helper; once the creature leaves the
+    // battlefield its controller reverts to its owner.
+    assert_eq!(
+        runner.state().objects[&victim].controller,
+        P1,
+        "CR 108.4a + CR 400.7: the graveyard card's controller is its owner again"
+    );
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Graveyard,
+        "reach-guard: the creature DID die — only the owner differs"
+    );
+    assert_eq!(
+        runner.state().phase,
+        Phase::End,
+        "the row's window was the end step"
+    );
+    assert_eq!(
+        treasure_token_count(&runner, P0),
+        0,
+        "the death was under your control, so \"under an opponent's control\" is false"
+    );
+}
+
 /// R6 (PRESERVATION row, explicitly not revert-failing by itself): two
 /// pre-seeded Treasures + the token created by the trigger reach exactly three,
 /// so the surviving "Then if you control three or more Treasures" sub-ability
@@ -803,7 +916,7 @@ fn hunt_the_mark_own_creature_death_creates_no_treasure() {
 /// clause that U2 must leave attached.
 #[test]
 fn hunt_the_mark_three_treasures_transform_preservation_row() {
-    let (mut runner, sidequest, victim) = hunt_the_mark_board(P1, 2);
+    let (mut runner, sidequest, victim) = hunt_the_mark_board(P1, None, 2);
 
     let mut targets = Vec::new();
     drive(&mut runner, &mut targets, &mut Vec::new(), |r| {
@@ -1511,39 +1624,50 @@ fn stonehewer_giant_searched_equipment_attaches_to_the_sole_host() {
 /// Verbatim Oracle text (Scryfall / the local export).
 const FUMBLE: &str = "Return target creature to its owner's hand. Gain control of all Auras and Equipment that were attached to it, then attach them to another creature.";
 
-/// CR 115.1d + CR 608.2d + CR 609.3 + CR 701.3b (ACCEPTED DECISION): Fumble's
-/// "then attach them to another creature" is a Resolution-timed described-host
-/// Attach whose INTENDED attachment set is the Auras/Equipment the previous
-/// instruction gained control of. `GainControlAll` does not publish that set as
-/// a typed attachment candidate set — a pre-existing limitation of the mass
-/// control-change effect, out of scope for this fix — so the intended set is
+/// CR 115.1a + CR 608.2d + CR 609.3 + CR 701.3b (ACCEPTED DECISION): Fumble's
+/// "then attach them to another creature" is a PLURAL-ANAPHOR Attach whose
+/// INTENDED attachment set is the Auras/Equipment the previous instruction
+/// gained control of. `GainControlAll` does not publish that set as a typed
+/// attachment candidate set — the provenance follow-up — so the intended set is
 /// never re-homed: the Aura stays unattached and leaves play via the
 /// unattached-Aura state-based action (CR 704.5m), the Equipment stays
 /// unattached on the battlefield (CR 704.5n), the bounce and the control change
-/// still resolve, and no error surfaces. A2 pins the same decision for a
-/// direct-constructed ability; this row pins it at the full-pipeline level.
+/// still resolve, and no error surfaces.
+/// `described_host_attach_with_no_attachment_is_a_silent_noop` (the
+/// direct-constructed attachment-empty row) pins the same no-op shape.
 ///
-/// DISCLOSED PRE-EXISTING DEFECT (surfaced by the whole-set host guard the
-/// review asked for; deliberately NOT fixed in this text/assertion round): the
-/// instruction is not a no-op as a whole. Its attachment operand is the plural
-/// anaphor "them", which the parser encodes as `TargetFilter::ParentTarget`;
-/// that tier of `attach.rs::resolve_attachment_ids` falls back to the ability's
-/// declared target — the BOUNCED creature — so the instruction attaches that
-/// creature to the described host. Measured on this exact row:
-/// `victim.attached_to == Some(Object(other))` and
-/// `other.attachments == [victim]`. The plural antecedent has no typed encoding
-/// in the AST (`ParentTarget` is singular), so the fix is an engine/AST change
-/// (a "the set this instruction gained control of" context reference, with
-/// `GainControlAll` publishing that set), not a test edit. The corpus class is
-/// narrow: of 35,977 cards, only Fumble prints this plural-anaphor shape
-/// (Outfitted Jouster's "attach them to Outfitted Jouster" names a conjured set
-/// instead). The bogus creature→host pair is pinned by the KNOWN-BAD LOCK below
-/// so the eventual fix has a tripwire to invert; the intended-set no-op and its
-/// reach-guards are asserted alongside it.
+/// TIMING BOUNDARY: the clause is EXPLICITLY EXCLUDED from the resolution-time
+/// promoted class by the tested plural-anaphor boundary in
+/// `oracle_effect::lower::target_choice_timing_for_clause` (the fragment prints
+/// "attach them "), so the host is a declared target again and this row drives
+/// it through the announcement-time target queue. A single-operand anaphor
+/// ("attach it to a creature you control" — Play Blitzball, Aura Graft,
+/// Stonehewer Giant) stays promoted; the boundary is what keeps the promoted
+/// class from pairing a host choice with a rules-incorrect operand.
+///
+/// DISCLOSED PRE-EXISTING GAP: the intended set is never re-homed, so the
+/// instruction is a no-op. Its attachment operand is the plural anaphor "them",
+/// which the parser encodes as `TargetFilter::ParentTarget`; the plural
+/// antecedent has no typed encoding in the AST (`ParentTarget` is singular), so
+/// the fix is the provenance follow-up: a "the set this instruction gained
+/// control of" context reference with `GainControlAll` publishing that set to
+/// `Effect::Attach`. The corpus class is narrow: of 35,977 cards, only Fumble
+/// reaches the promoted class; the corpus's other two plural-anaphor clauses
+/// (Outfitted Jouster's "attach them to Outfitted Jouster" — a conjured set with
+/// a `SelfRef` host; Helm of Kaldra's "Attach those Equipment to it." — an `Any`
+/// attachment) were never promoted.
+///
+/// MEASURED STACK-TIMED OUTCOME (what the lock below pins): with the host slot
+/// declared again, the slot is used as BOTH the attachment operand and the host
+/// (`attachment_ids == [host]`, `target_id == host`), so the instruction
+/// self-attaches and CR 701.3b makes it a no-op — nothing is attached anywhere.
+/// The promoted path's bogus bounced-creature→host pair does NOT occur here: it
+/// arose from resolving the attachment operand off the propagated parent target
+/// while the described host came from the prompt.
 ///
 /// NAME: renamed from `fumble_multi_attachment_attach_is_a_silent_noop` — the
-/// attach instruction is not a silent no-op (see the defect note above); only
-/// the INTENDED attachment set is never re-homed.
+/// attach instruction is not a silent no-op (see the gap note above); only the
+/// INTENDED attachment set is never re-homed.
 #[test]
 fn fumble_gained_attachment_set_is_not_rehomed() {
     let mut scenario = GameScenario::new();
@@ -1586,7 +1710,13 @@ fn fumble_gained_attachment_set_is_not_rehomed() {
     assert_eq!(runner.state().objects[&aura].controller, P1);
     assert_eq!(runner.state().objects[&equipment].controller, P1);
 
-    let outcome = runner.cast(fumble).target_object(victim).resolve();
+    // The plural-anaphor boundary keeps this clause Stack-timed, so the host is
+    // a declared target chosen at announcement: the target queue is
+    // [the bounce target, the attach host].
+    let outcome = runner
+        .cast(fumble)
+        .target_objects(&[victim, other])
+        .resolve();
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "the spell must resolve to a quiet priority window — no error, no prompt: {:?}",
@@ -1619,6 +1749,11 @@ fn fumble_gained_attachment_set_is_not_rehomed() {
         None,
         "the Aura is not attached to anything after the no-op"
     );
+    assert_eq!(
+        runner.state().objects[&aura].zone,
+        Zone::Graveyard,
+        "reach-guard: CR 704.5m swept the host-less Aura to the graveyard"
+    );
     assert!(
         !runner.state().objects[&other]
             .attachments
@@ -1629,21 +1764,23 @@ fn fumble_gained_attachment_set_is_not_rehomed() {
         !runner.state().objects[&other].attachments.contains(&aura),
         "the other creature must not receive the Aura"
     );
-    // KNOWN-BAD LOCK (the plural-anaphor defect documented on this row): the
-    // engine attaches the BOUNCED creature to the candidate host, because the
-    // plural "them" lowers to `TargetFilter::ParentTarget` and that tier falls
-    // back to the ability's declared target. This is pinned on purpose: it must
-    // be INVERTED when the plural-anaphor fix supplies the gained
-    // Aura/Equipment set — after that fix the victim is NOT attached to
-    // anything, and the gained set is re-homed to the host instead.
+    // KNOWN-BAD LOCK (MEASURED; the review expected the promoted path's
+    // `victim → other` pair to persist here — it does not, see the row doc): the
+    // declared host slot is used as both the attachment operand and the host, so
+    // the instruction self-attaches and CR 701.3b makes it a no-op. Nothing is
+    // attached anywhere, and the intended set is never re-homed. The host-
+    // emptiness half inverts when the provenance follow-up re-homes the gained
+    // set; the victim half stays true and guards against the bogus pair
+    // returning.
     assert_eq!(
         runner.state().objects[&victim].attached_to,
-        Some(AttachTarget::Object(other)),
-        "KNOWN-BAD: the bounced creature is attached to the candidate host"
+        None,
+        "KNOWN-BAD (no-op): the bounced creature is not attached to anything"
     );
     assert!(
-        runner.state().objects[&other].attachments.contains(&victim),
-        "KNOWN-BAD: the candidate host lists the bounced creature as an attachment"
+        runner.state().objects[&other].attachments.is_empty(),
+        "KNOWN-BAD (no-op): the candidate host received nothing, got {:?}",
+        runner.state().objects[&other].attachments
     );
     // Reach-guard (CR 704.5n: an Equipment stays in play when its host leaves):
     // the Equipment must still be on the battlefield, otherwise the two guards

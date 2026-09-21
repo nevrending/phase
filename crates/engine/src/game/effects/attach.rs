@@ -672,20 +672,21 @@ fn prompt_resolution_attachment_choice(
 /// structural scan would invert under `Not` and over-exclude under `Or`.
 ///
 /// True when NO attachment operand has a current host (nothing to exclude), or
-/// when SOME operand with current host `C` accepts `host_id` under its
-/// `recipient_id = C` context. CR 701.3b makes an attach to the object the
-/// attachment is already on do nothing and CR 608.2d forbids offering an option
-/// the effect cannot take; Scryfall's Aura Graft ruling adds that with no legal
-/// place to move the enchantment it simply doesn't move.
+/// when EVERY operand with current host `C` accepts `host_id` under its
+/// `recipient_id = C` context. The host-relative "another" is an eligibility
+/// condition for EACH attachment it governs, so a single admitted operand is
+/// not enough: with two attachments on different hosts, the existential reading
+/// would admit host A (it is "another" relative to B) and the later attachment
+/// choice could then select the attachment already on A. CR 701.3b makes an
+/// attach to the object the attachment is already on do nothing and CR 608.2d
+/// forbids offering an option the effect cannot take; Scryfall's Aura Graft
+/// ruling adds that with no legal place to move the enchantment it simply
+/// doesn't move.
 ///
 /// Consumers, kept on this one authority so they cannot drift: the host
 /// enumerations ([`prompt_described_host_choice`],
 /// [`prompt_forwarded_attachment_choice`]) and the answer-binding check
 /// ([`bind_resolution_attachment_choice`]).
-///
-/// The corpus reaches this with a single attachment operand (Aura Graft), where
-/// the `SOME` disjunction is exact; a future multi-operand host-relative clause
-/// would need the conjunction over operands instead.
 fn host_choice_admissible_for_attachment_references(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -694,20 +695,18 @@ fn host_choice_admissible_for_attachment_references(
     attachment_ids: &[ObjectId],
 ) -> bool {
     let effective = crate::game::effects::resolved_object_filter(state, ability, host_filter);
-    let mut any_current_host = false;
     for &attachment_id in attachment_ids {
         let Some(current_host) = attachment_current_host(state, attachment_id) else {
             continue;
         };
-        any_current_host = true;
         // `recipient_id` IS the `Another` reference: "another permanent" means
         // a permanent other than the one this attachment is on.
         let ctx = FilterContext::from_ability_with_recipient(ability, current_host);
-        if matches_target_filter(state, host_id, &effective, &ctx) {
-            return true;
+        if !matches_target_filter(state, host_id, &effective, &ctx) {
+            return false;
         }
     }
-    !any_current_host
+    true
 }
 
 /// CR 701.3a + CR 303.4b: The battlefield object an attachment is currently
@@ -4435,6 +4434,108 @@ mod tests {
                 &operands,
             ),
             "Not(Another) must reject every other permanent"
+        );
+    }
+
+    /// CR 701.3b + CR 608.2d: the host-relative "another" admission is a
+    /// CONJUNCTION over the attachment operands. With two forwarded attachments
+    /// on two different current hosts, each host fails "another" for the
+    /// attachment already there, so only a third host is admitted — and the
+    /// forwarded prompt parks the ATTACHMENT choice for that one host rather
+    /// than a host choice over the two occupied hosts. (Existential admission
+    /// would offer both occupied hosts.)
+    #[test]
+    fn host_choice_admission_requires_every_attachments_another_leg() {
+        let mut state = setup();
+        let host1 = spawn_creature(&mut state, "Host One");
+        let host2 = spawn_creature(&mut state, "Host Two");
+        let spare = spawn_creature(&mut state, "Spare Host");
+        let attachment_a = spawn_equipment(&mut state, "Blade A", 10);
+        let attachment_b = spawn_equipment(&mut state, "Blade B", 11);
+        attach_to(&mut state, attachment_a, host1);
+        attach_to(&mut state, attachment_b, host2);
+
+        let host_filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another]));
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: host_filter.clone(),
+            },
+            Vec::new(),
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.bind_attach_attachment_candidates(vec![
+            ObjectIncarnationRef::from_object(state.objects.get(&attachment_a).unwrap()),
+            ObjectIncarnationRef::from_object(state.objects.get(&attachment_b).unwrap()),
+        ]);
+        let operands = vec![attachment_a, attachment_b];
+
+        // Helper level: every occupied host is rejected; only the spare is
+        // admitted.
+        assert!(
+            !host_choice_admissible_for_attachment_references(
+                &state,
+                &ability,
+                &host_filter,
+                host1,
+                &operands,
+            ),
+            "host1 fails \"another\" for the attachment already on it"
+        );
+        assert!(
+            !host_choice_admissible_for_attachment_references(
+                &state,
+                &ability,
+                &host_filter,
+                host2,
+                &operands,
+            ),
+            "host2 fails \"another\" for the attachment already on it"
+        );
+        assert!(
+            host_choice_admissible_for_attachment_references(
+                &state,
+                &ability,
+                &host_filter,
+                spare,
+                &operands,
+            ),
+            "a host carrying neither attachment is admissible"
+        );
+
+        // Enumeration level: the forwarded prompt auto-binds the one admitted
+        // host and then parks the ATTACHMENT choice for it. Under existential
+        // admission it would instead park a HOST choice over host1/host2/spare.
+        let mut events = Vec::new();
+        let outcome = prompt_forwarded_attachment_choice(&mut state, &ability, &mut events)
+            .expect("the forwarded host prompt must resolve without error");
+        assert!(
+            matches!(outcome, AttachPromptOutcome::Paused),
+            "the attachment choice for two forwarded Equipment parks"
+        );
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { cards, .. } => assert_eq!(
+                cards,
+                &vec![attachment_a, attachment_b],
+                "the parked choice is the ATTACHMENT set, not the occupied hosts"
+            ),
+            other => panic!("expected the parked attachment choice, got {other:?}"),
+        }
+        let bound_host = state
+            .active_ability_continuation_frame()
+            .and_then(|frame| frame.pending.attachment_choice.as_ref())
+            .and_then(|choice| choice.operation.attach_host_target())
+            .map(|host| host.object_id);
+        assert_eq!(
+            bound_host,
+            Some(spare),
+            "the enumeration bound the only host admissible for BOTH attachments"
         );
     }
 

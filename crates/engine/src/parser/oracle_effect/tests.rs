@@ -51923,8 +51923,10 @@ fn attach_host_timing_play_blitzball_is_resolution() {
     );
 }
 
-/// CR 115.1d + CR 608.2d: Aura Graft's "Attach it to another permanent it can
-/// enchant" — described host, battlefield objects, printed verb ⇒ Resolution.
+/// CR 115.1a + CR 608.2d: Aura Graft's "Attach it to another permanent it can
+/// enchant" — described host, battlefield objects, printed verb ⇒ Resolution
+/// (an Instant clause, so the spell-form targeting rule 115.1a applies; the
+/// triggered class keeps CR 115.1d).
 #[test]
 fn attach_host_timing_aura_graft_is_resolution() {
     let def = parse_effect_chain(
@@ -51951,6 +51953,29 @@ fn attach_host_timing_stonehewer_giant_is_resolution() {
         attach_node(&def).target_choice_timing,
         TargetChoiceTiming::Resolution,
         "the searched-up Equipment's host is described, not targeted"
+    );
+}
+
+/// CR 115.1a + CR 608.2d: the PLURAL-ANAPHOR BOUNDARY. Fumble's "then attach
+/// them to another creature" names a SET ("them" = the Auras/Equipment the
+/// previous instruction gained control of) with no typed provenance, so a
+/// resolution-time host choice would be paired with a rules-incorrect operand
+/// (the ParentTarget tier falls back to the ability's declared target — the
+/// bounced creature). The clause therefore keeps its pre-existing Stack
+/// treatment; the single-operand rows above stay promoted. Inverting this row
+/// belongs to the follow-up that publishes the gained set from `GainControlAll`
+/// to `Effect::Attach`.
+#[test]
+fn attach_host_timing_plural_anaphor_stays_stack() {
+    let def = parse_effect_chain(
+        "Gain control of all Auras and Equipment that were attached to it, then attach them to another creature.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "a plural attachment anaphor has no typed operand provenance, so the host \
+         keeps its pre-existing stack-time slot"
     );
 }
 
