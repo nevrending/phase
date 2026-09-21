@@ -15234,7 +15234,7 @@ impl AttachCardinality {
     /// imposes on the resolution-time attachment choice. `All` maps to the
     /// legacy single-choice bounds because the determined-set enumeration does
     /// not exist yet (see the enum doc); the mapping is behavior-preserving for
-    /// the four cards that print it today.
+    /// the four Attach instructions (three cards) that carry it today.
     pub fn to_multi_target_spec(&self) -> MultiTargetSpec {
         match self {
             Self::One | Self::All => MultiTargetSpec::fixed(1, 1),

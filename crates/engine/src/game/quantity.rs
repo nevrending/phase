@@ -6643,8 +6643,9 @@ fn aggregate_per_group<'a, K: Eq + std::hash::Hash>(
 /// partitions by the group key, sums each partition, and applies `aggregate`
 /// across the per-group sums.
 ///
-/// Two grouping axes exist (CR 120.9's grouping family — one partition of the
-/// same record stream per participant role):
+/// Two grouping axes exist — one partition of the same record stream per
+/// participant role, each under its own authority (CR 120.9 for the source
+/// axis; CR 120.1 + CR 120.3 for the recipient axis):
 /// - `Some(SourceId)` — "the most damage dealt by any single source";
 /// - `Some(Target)` — "the most damage dealt to any single recipient", the
 ///   existential reading of the printed phrase "a player / an opponent was

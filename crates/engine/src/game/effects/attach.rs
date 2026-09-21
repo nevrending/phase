@@ -3519,8 +3519,9 @@ mod tests {
             (0, 0)
         );
 
-        // "all Equipment" is behavior-preserving today: the resolver serves one
-        // operand (documented gap in `AttachCardinality::All`).
+        // "all Equipment" is behavior-preserving today: the determined-set
+        // enumeration does not exist yet, so `All` maps to the legacy
+        // single-choice bounds (see `AttachCardinality::All`).
         assert_eq!(
             {
                 let b = bounds(described(AttachCardinality::All), 3);
