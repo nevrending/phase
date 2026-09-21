@@ -4875,7 +4875,7 @@ pub(crate) fn rewrite_chosen_player_to_you(filter: &TargetFilter) -> TargetFilte
 /// Whether the attachment operand of `Effect::Attach` consumes an explicit
 /// player-chosen target. Scan-based filters (e.g. "Equipment attached to ~")
 /// resolve from the battlefield/LKI and must not steal `ParentTarget` slots.
-fn attach_attachment_filter_needs_target_slot(filter: &TargetFilter) -> bool {
+pub(crate) fn attach_attachment_filter_needs_target_slot(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Any => true,
         TargetFilter::Typed(tf) => !tf

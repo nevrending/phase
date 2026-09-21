@@ -9736,27 +9736,31 @@ impl TrackedAnaphorSource {
 
 /// Grouping key for damage-history aggregation. Two axes exist: `SourceId`
 /// (CR 120.9 — damage dealt "by a specific source", the per-source reading) and
-/// `Target` (CR 603.4 — the per-recipient existential reading of "a player was
-/// dealt N or more damage this turn"). Both partition the same record stream,
-/// and the selected `AggregateFunction` is applied across the per-group sums
-/// (`Max` is the existential reading, `Sum` collapses to the ungrouped total).
+/// `Target` (CR 120.1 + CR 120.3 — the recipient axis: damage is dealt to
+/// objects/players and its result is keyed per recipient; the printed phrase
+/// "a player was dealt N or more" is read existentially under CR 608.2c, and
+/// CR 603.4 supplies the intervening-if check timing). Both partition the same
+/// record stream, and the selected `AggregateFunction` is applied across the
+/// per-group sums (`Max` is the existential reading, `Sum` collapses to the
+/// ungrouped total).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DamageGroupKey {
     /// CR 120.9: Group records by `DamageRecord::source_id` so the resolver can
     /// answer "the most damage dealt by any single source."
     SourceId,
-    /// CR 603.4: Group records by `DamageRecord::target` — the damaged object or
-    /// player — so the resolver can answer "the most damage dealt to any single
-    /// recipient". This is the existential reading of the printed phrase "a player
-    /// / an opponent was dealt N or more damage this turn": that clause is true
-    /// exactly when SOME ONE recipient was dealt that much, because the
-    /// intervening-if is evaluated against every recipient of the turn's damage
-    /// (CR 603.4), never against the sum across recipients.
+    /// CR 120.1 + CR 120.3: Group records by `DamageRecord::target` — the
+    /// damaged object or player — so the resolver can answer "the most damage
+    /// dealt to any single recipient". This is the existential reading of the
+    /// printed phrase "a player / an opponent was dealt N or more damage this
+    /// turn" (read under CR 608.2c): that clause is true exactly when SOME ONE
+    /// recipient was dealt that much, never when the sum across recipients
+    /// reaches it. CR 603.4 supplies the check timing (at fire and again as the
+    /// intervening-if resolves) for the trigger-borne members of the class.
     ///
     /// Mirrors `SourceId`'s partitioning on the recipient axis (the same record
     /// stream partition, keyed by the other participant; the authority for the
-    /// recipient axis is CR 603.4, not CR 120.9, which is source-scoped).
-    /// `Max` over the per-recipient sums is the existential test;
+    /// recipient axis is CR 120.1 + CR 120.3, not CR 120.9, which is
+    /// source-scoped). `Max` over the per-recipient sums is the existential test;
     /// `Sum` over them equals the ungrouped total, so `Some(Target) + Sum` and
     /// `None` coincide.
     ///

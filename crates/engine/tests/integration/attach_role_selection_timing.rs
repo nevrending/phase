@@ -335,6 +335,64 @@ fn ardenn_host_matching_the_attachment_filter_is_not_consumed_as_the_operand() {
     );
 }
 
+/// CR 107.1c + CR 608.2d: the printed "any number of" binds the WHOLE chosen set.
+/// Two eligible Equipment at resolution, both answered, both attached — the
+/// multi-select half of the described-attachment loop.
+#[test]
+fn beatrix_any_number_binds_the_whole_chosen_set() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Beatrix, Loyal General", 2, 2, BEATRIX)
+        .id();
+    let host = scenario.add_creature(P0, "Host Bear", 2, 2).id();
+    let equipment_a = equipment(&mut scenario, "Sword A");
+    let equipment_b = equipment(&mut scenario, "Sword B");
+    let mut runner = scenario.build();
+
+    runner.advance_to_phase(Phase::BeginCombat);
+
+    let mut targets: Vec<ObjectId> = vec![host];
+    let mut attach_choices: Vec<ObjectId> = Vec::new();
+    drive(&mut runner, &mut targets, &mut attach_choices, |runner| {
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice {
+                effect_kind: EffectKind::Attach,
+                ..
+            }
+        )
+    });
+    let WaitingFor::EffectZoneChoice { cards, .. } = runner.state().waiting_for.clone() else {
+        unreachable!("drive stopped on the attach choice");
+    };
+    assert!(
+        cards.contains(&equipment_a) && cards.contains(&equipment_b),
+        "both Equipment must be offered, got {cards:?}"
+    );
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![equipment_a, equipment_b],
+        })
+        .expect("selecting the whole eligible set must be legal");
+    drive(&mut runner, &mut targets, &mut attach_choices, |runner| {
+        runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+    });
+
+    assert_eq!(
+        runner.state().objects[&equipment_a].attached_to,
+        Some(AttachTarget::Object(host)),
+        "the first chosen Equipment must attach"
+    );
+    assert_eq!(
+        runner.state().objects[&equipment_b].attached_to,
+        Some(AttachTarget::Object(host)),
+        "the second chosen Equipment must attach (the whole set binds)"
+    );
+}
+
 /// CR 107.1c: "any number" includes zero — DECLINING Beatrix's parked attachment
 /// choice attaches NOTHING. The parked choice must not fall back to the first
 /// eligible object when the answer is an empty set.

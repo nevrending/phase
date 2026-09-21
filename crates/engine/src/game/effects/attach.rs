@@ -143,7 +143,7 @@ fn resolve_with_prompt(
 /// empty one (the final tier) — the explicit-slot tier is unreachable for
 /// every Attach attachment operand shape the parser emits (the one overlap in
 /// the predicates, `Typed{controller: ChosenPlayer}`, is admitted by both
-/// `is_context_ref` and `attachment_filter_uses_explicit_target_slot` but is
+/// `is_context_ref` and `attach_attachment_filter_needs_target_slot` but is
 /// not a shape the Attach parser produces).
 fn resolve_attachment_ids<'a>(
     state: &GameState,
@@ -634,7 +634,7 @@ fn prompt_resolution_attachment_choice(
             );
         }
     }
-    if !attachment_filter_uses_explicit_target_slot(attachment_filter) {
+    if !crate::game::ability_utils::attach_attachment_filter_needs_target_slot(attachment_filter) {
         return Ok(AttachPromptOutcome::Execute);
     }
     // CR 115.1a/c/d/e + CR 608.2d: only a PRINTED-target attachment operand may be
@@ -1151,7 +1151,9 @@ fn parked_attach_choice_selects_host(operation: &ResolvedAbility) -> bool {
             Effect::Attach { attachment, .. } => {
                 !operation.attach_attachment_candidates().is_empty()
                     || (attachment.is_context_ref()
-                        && !attachment_filter_uses_explicit_target_slot(attachment))
+                        && !crate::game::ability_utils::attach_attachment_filter_needs_target_slot(
+                            attachment,
+                        ))
             }
             _ => false,
         }
@@ -1521,24 +1523,6 @@ fn resolve_parent_target_attachment_from_trigger(state: &GameState) -> Option<Ob
             None
         }
     })
-}
-
-/// Only explicit attachment choices consume player-chosen target slots.
-/// Scan-based filters (e.g. "Equipment that was attached to ~") resolve from
-/// the battlefield or LKI and must not steal `ParentTarget` slots.
-fn attachment_filter_uses_explicit_target_slot(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Any => true,
-        TargetFilter::Typed(tf) => !tf
-            .properties
-            .iter()
-            .any(|p| matches!(p, FilterProp::AttachedToSource)),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter()
-            .any(attachment_filter_uses_explicit_target_slot),
-        TargetFilter::Not { filter } => attachment_filter_uses_explicit_target_slot(filter),
-        _ => false,
-    }
 }
 
 fn resolve_object_filter<'a>(
