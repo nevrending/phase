@@ -16,7 +16,7 @@ import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supports
 import type { WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { PEER_CONNECT_OPTIONS } from "../../network/connection";
-import { WIRE_PROTOCOL_VERSION, type P2PMessage } from "../../network/protocol";
+import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 import { ownsP2PHostLease } from "../../services/p2pSession";
 
@@ -4480,14 +4480,14 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Revert 56 → 55 and BOTH halves red: the v55 frame stops being
-  // refused, and the v57 frame stops being admitted. The admitting half is
-  // the reach-guard — without it "refuses v53" is also satisfied by a client
+  // bump. Revert 57 → 56 and BOTH halves red: the v56 frame stops being
+  // refused, and the v58 frame stops being admitted. The admitting half is
+  // the reach-guard — without it "refuses v57" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v56) and admits its own (v57)", async () => {
+  it("refuses the previous wire protocol (v57) and admits its own (v58)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(56));
+    await refusing.conn.simulateData(setupFrameAt(57));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -4499,7 +4499,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(57));
+    await admitting.conn.simulateData(setupFrameAt(58));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(
@@ -4628,7 +4628,7 @@ describe("P2P wire-protocol version gate", () => {
 });
 
 /**
- * FU-53. A frame the transport cannot deliver used to die in a `console.warn`,
+ * A frame the transport cannot deliver used to die in a `console.warn`,
  * leaving `initializeGame()` pending forever and the user unmessaged. The
  * answer is keyed on re-requestability, not on the cause: the host's redelivery
  * sweep heals a seated guest, `reconnect_ack` can be re-asked for exactly once,
@@ -4951,9 +4951,10 @@ describe("P2P undeliverable frames", () => {
     garbled.fireOpen();
     await garbled.simulateData(undecodable());
 
-    // Decision 2's admitted member, pinned: `identified` flips only inside the
-    // one-shot `onMessage`, which runs only on a decodable frame, so the host
-    // cannot tell this guest from a tokenless one and spends no retry on it.
+    // The host answers a token-bearing guest exactly as a tokenless one, and
+    // that is deliberate: `identified` flips only inside the one-shot
+    // `onMessage`, which runs only on a decodable frame, so a frame the host
+    // could not decode carries no token to tell the two apart.
     expect(await sentOfType(garbled, "reconnect_rejected")).toEqual(
       expect.objectContaining({ reasonCode: "first_message_invalid" }),
     );
@@ -4970,6 +4971,33 @@ describe("P2P undeliverable frames", () => {
     await flushPromises(20);
     expect(await sentOfType(clean, "reconnect_ack")).toBeDefined();
     expect(await sentOfType(clean, "reconnect_rejected")).toBeUndefined();
+    adapter.dispose();
+  });
+
+  it("keeps a seated guest when an undeliverable frame arrives with its join", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+
+    const joining = new FakeOpenableConnection();
+    emitConnection(joining as unknown as DataConnection);
+    joining.fireOpen();
+    const okBytes = await encodeWireMessage({
+      type: "guest_deck",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    } as P2PMessage);
+
+    // One tick, no await between: `identified` flips on `peer.ts`'s dispatch
+    // queue while the drop is reported on its recv queue, and awaiting the
+    // join first drains the former so the two never interleave.
+    const join = joining.simulateData(okBytes);
+    const drop = joining.simulateData(undecodable());
+    await Promise.all([join, drop]);
+    await flushPromises(20);
+
+    expect(adapter.getPlayerSlots()[1]?.kind.type).toBe("JoinedHuman");
+    expect(joining.open).toBe(true);
+    expect(await sentOfType(joining, "reconnect_rejected")).toBeUndefined();
     adapter.dispose();
   });
 });
