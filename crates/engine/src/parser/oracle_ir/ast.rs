@@ -1415,6 +1415,11 @@ pub(crate) enum MultiZoneExileQuantifier {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// Intentional: variants carry parser IR directly (the `Attach` arm's printed
+// role/cardinality plus its announced-count spec), mirroring
+// `oracle_ir::effect_chain` and `oracle_ir::doc`; boxing a field here would add
+// an allocation per parsed clause without changing what is carried.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum UtilityImperativeAst {
     Prevent {
         text: String,

@@ -52085,8 +52085,10 @@ fn plural_demonstrative_attachment_clause_is_unsupported() {
 fn plural_attachment_anaphor_guard_steps_aside_with_typed_antecedent() {
     let text = "attach them to another creature";
     let lower = text.to_ascii_lowercase();
-    let mut ctx = ParseContext::default();
-    ctx.plural_object_pronoun_ref = Some(TargetFilter::ExiledBySource);
+    let mut ctx = ParseContext {
+        plural_object_pronoun_ref: Some(TargetFilter::ExiledBySource),
+        ..Default::default()
+    };
     let ast = crate::parser::oracle_effect::imperative::parse_utility_imperative_ast(
         text, &lower, &mut ctx,
     )
