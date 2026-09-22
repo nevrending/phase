@@ -1486,6 +1486,15 @@ pub(crate) enum UtilityImperativeAst {
         /// The printed clause, for the `Unimplemented` description.
         fragment: String,
     },
+    /// CR 115.10a + CR 608.2d: a DETERMINED "attach all …" clause whose printed
+    /// attachment RELATION the two-` to ` split dropped ("attach all Equipment
+    /// attached to that creature to Rhuk"). Executing the resulting unqualified
+    /// set would attach every matching object in play — including opponents' —
+    /// so the clause is refused until the relation and the host are modelled.
+    AttachAllRelation {
+        /// The printed clause, for the `Unimplemented` description.
+        fragment: String,
+    },
     UnattachAll {
         attachment: TargetFilter,
         target: TargetFilter,

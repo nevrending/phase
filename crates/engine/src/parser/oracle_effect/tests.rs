@@ -52238,6 +52238,49 @@ fn attach_selection_all_is_recorded() {
     }
 }
 
+/// CR 115.10a + CR 608.2d: a determined "attach all …" clause whose printed
+/// RELATION the first-` to ` split drops is refused rather than executed as an
+/// unqualified set. Rhuk, Hexgold Nabber: "attach all Equipment attached to that
+/// creature to ~" — executing it would bind every Equipment in play.
+#[test]
+fn attach_all_relation_is_refused() {
+    let def = parse_effect_chain(
+        "attach all Equipment attached to that creature to ~.",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::Unimplemented { name, description } => {
+            assert_eq!(name, "attach_all_relation");
+            assert!(
+                description
+                    .as_deref()
+                    .is_some_and(|d| d.contains("attached to that creature")),
+                "the gap description must carry the refused clause, got {description:?}"
+            );
+        }
+        other => panic!("the dropped-relation determined set must be refused, got {other:?}"),
+    }
+
+    // Positive controls: the two determinate-set clauses whose relation and host
+    // ARE modelled keep their `All` role and still execute.
+    for text in [
+        "Attach all Equipment you control to Balan.",
+        "attach all Equipment on the battlefield to it.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        match &*attach_node(&def).effect {
+            Effect::Attach { selection, .. } => assert_eq!(
+                selection,
+                &AttachSelection::AtResolution {
+                    count: AttachCardinality::All
+                },
+                "{text}"
+            ),
+            other => panic!("{text}: expected Attach, got {other:?}"),
+        }
+    }
+}
+
 /// CR 115.10a + CR 608.2d: determined operands (context references) and
 /// "up to N" described operands carry their truthful role/cardinality.
 #[test]

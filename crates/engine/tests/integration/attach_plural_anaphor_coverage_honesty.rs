@@ -73,6 +73,34 @@ fn plural_anaphor_attachment_reports_a_coverage_gap() {
     );
 }
 
+/// CR 115.10a + CR 608.2d: a determined "attach all …" clause whose printed
+/// RELATION the two-` to ` split dropped (Rhuk, Hexgold Nabber) is refused too:
+/// executing the unqualified set would attach every matching object in play,
+/// including opponents'. Paired positive control: Balan's determinate clause,
+/// whose relation and host are modelled, stays supported.
+#[test]
+fn dropped_relation_determined_set_reports_a_coverage_gap() {
+    let rhuk = spell_face(
+        "Rhuk, Hexgold Nabber",
+        "Trample, haste\nWhenever an equipped creature you control other than Rhuk attacks or dies, you may attach all Equipment attached to that creature to Rhuk.",
+    );
+    let gaps = card_face_gaps(&rhuk);
+    assert!(
+        gaps.iter().any(|gap| gap.contains("attach_all_relation")),
+        "the dropped-relation determined set must surface a coverage gap, got {gaps:?}"
+    );
+
+    let balan = spell_face(
+        "Balan, Wandering Knight",
+        "{1}{W}: Attach all Equipment you control to Balan.",
+    );
+    assert!(
+        card_face_gaps(&balan).is_empty(),
+        "a determinate set whose relation and host ARE modelled stays supported, got {:?}",
+        card_face_gaps(&balan)
+    );
+}
+
 /// Paired positive control: the SINGULAR form of the same sentence still parses
 /// to a fully supported card. Without this row the gap above could pass because
 /// the sentence's other clauses regressed, not because plurality is refused.

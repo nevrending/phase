@@ -6875,6 +6875,24 @@ pub(super) fn parse_utility_imperative_ast(
             } else {
                 AttachSelection::AtResolution { count: cardinality }
             };
+            // CR 115.10a + CR 608.2d: a DETERMINED "attach all …" set requires the
+            // attachment RELATION and the host to be modelled. A clause with more
+            // than one " to " (Rhuk, Hexgold Nabber: "attach all Equipment attached
+            // to that creature to Rhuk") is split at the FIRST separator, which
+            // drops the relation and leaves the printed host in the recipient text;
+            // executing the resulting unqualified set would attach every matching
+            // object in play, including opponents'. Refuse the clause instead.
+            if matches!(
+                selection,
+                AttachSelection::AtResolution {
+                    count: AttachCardinality::All,
+                }
+            ) && nom_primitives::scan_contains(&target_text.to_ascii_lowercase(), "to ")
+            {
+                return Some(UtilityImperativeAst::AttachAllRelation {
+                    fragment: text.to_string(),
+                });
+            }
             let (attachment, _attachment_rem) = parse_attachment_anaphor(&attachment_text, ctx);
             let (target, _target_rem) =
                 parse_attach_recipient(&target_text, ctx, Some(&attachment));
@@ -7356,6 +7374,12 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         // Honest unsupported beats a wrong-operand attach.
         UtilityImperativeAst::AttachPluralAnaphor { fragment } => {
             Effect::unimplemented("plural_attachment_anaphor", fragment)
+        }
+        // CR 115.10a + CR 608.2d: the determined set's relation/host split is
+        // unmodelled (see the AST variant doc). Honest unsupported beats binding
+        // every matching object in play.
+        UtilityImperativeAst::AttachAllRelation { fragment } => {
+            Effect::unimplemented("attach_all_relation", fragment)
         }
         UtilityImperativeAst::UnattachAll { attachment, target } => {
             Effect::UnattachAll { attachment, target }
