@@ -4,9 +4,9 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
-    AbilityCondition, AttachSelection, Effect, EffectError, EffectKind, FilterProp,
-    MultiTargetSpec, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
-    TypedFilter,
+    AbilityCondition, AttachCardinality, AttachSelection, Effect, EffectError, EffectKind,
+    FilterProp, MultiTargetSpec, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter,
+    TargetRef, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -124,10 +124,60 @@ fn resolve_with_prompt(
     };
 
     match prompt_resolution_attachment_choice(state, ability, attachment_filter, events)? {
-        AttachPromptOutcome::Execute => resolve_bound_attachment_operation(state, ability, events),
+        AttachPromptOutcome::Execute => {
+            let bound = bind_determined_attachment_set(state, ability, attachment_filter);
+            resolve_bound_attachment_operation(state, &bound, events)
+        }
         AttachPromptOutcome::Completed => Ok(AttachResolutionOutcome::Completed),
         AttachPromptOutcome::Paused => Ok(AttachResolutionOutcome::Paused),
     }
+}
+
+/// CR 107.1c + CR 608.2d: "attach all <filter>" is a DETERMINED set — every
+/// matching object attaches and no player chooses. Bind that whole live set
+/// before execution so the operation resolves through the same bound-target
+/// tier a player choice produces: the executor's multi-attachment loop and its
+/// replacement-pause deferral (`defer_remaining_selected_attachments`) then
+/// apply unchanged.
+///
+/// Returns the ability unchanged for every other shape (a printed target, an
+/// "any number"/"up to N" choice, or an operation that already carries a bound
+/// set from a forwarded candidate or a parked answer).
+fn bind_determined_attachment_set(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    attachment_filter: &TargetFilter,
+) -> ResolvedAbility {
+    if !attach_is_determined_set(&ability.effect)
+        || !ability.attach_attachment_targets().is_empty()
+        || !ability.attach_attachment_candidates().is_empty()
+    {
+        return ability.clone();
+    }
+    let mut bound = ability.clone();
+    bound.set_attach_attachment_targets(
+        battlefield_ids_matching_filter(state, ability, attachment_filter)
+            .iter()
+            .filter_map(|id| state.objects.get(id).map(ObjectIncarnationRef::from_object))
+            .collect(),
+    );
+    bound
+}
+
+/// CR 107.1c + CR 608.2d: True when this effect's ATTACHMENT operand is a
+/// determined set ("attach all <filter>") rather than a printed target or a
+/// described choice. Single authority for the prompt-phase short-circuit and
+/// the executor's set binding.
+fn attach_is_determined_set(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Attach {
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::All,
+            },
+            ..
+        }
+    )
 }
 
 /// CR 608.2d + CR 608.2h + CR 609.3: Resolve the ATTACHMENT operand of an
@@ -633,6 +683,17 @@ fn prompt_resolution_attachment_choice(
                 events,
             );
         }
+    }
+    // CR 107.1c + CR 608.2d: a DETERMINED set ("attach all <filter>") offers no
+    // choice — every matching object attaches. An empty population attaches
+    // nothing (CR 608.2d: nothing to choose, nothing to affect); otherwise the
+    // caller binds the whole live set and executes it.
+    if attach_is_determined_set(&ability.effect) {
+        return if battlefield_ids_matching_filter(state, ability, attachment_filter).is_empty() {
+            Ok(AttachPromptOutcome::Completed)
+        } else {
+            Ok(AttachPromptOutcome::Execute)
+        };
     }
     if !crate::game::ability_utils::attach_attachment_filter_needs_target_slot(attachment_filter) {
         return Ok(AttachPromptOutcome::Execute);
@@ -3519,9 +3580,10 @@ mod tests {
             (0, 0)
         );
 
-        // "all Equipment" is behavior-preserving today: the determined-set
-        // enumeration does not exist yet, so `All` maps to the legacy
-        // single-choice bounds (see `AttachCardinality::All`).
+        // "all Equipment" never reaches the choice bounds: the prompt phase
+        // short-circuits a determined set and the caller binds the whole live
+        // set (see `bind_determined_attachment_set`). This row only pins the
+        // total-mapping fallback.
         assert_eq!(
             {
                 let b = bounds(described(AttachCardinality::All), 3);

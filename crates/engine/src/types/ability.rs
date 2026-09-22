@@ -15202,12 +15202,10 @@ impl AttachSelection {
 ///
 /// `AnyNumber` follows CR 107.1c ("any number" includes zero); `UpTo(N)` is the
 /// "up to N" form; `All` is a DETERMINED set ("attach all Equipment you
-/// control") that has NO player choice at all — every matching object attaches.
-/// The executor loop already delivers multi-object attachment sets (the
-/// whole-set pipeline row pins it); what `All` still lacks is the determined-set
-/// enumeration itself (there is no "attach every match without a choice" path),
-/// so it maps to the legacy single-choice bounds today. The variant is recorded
-/// so that follow-up has a typed seam.
+/// control") with NO player choice at all — every matching object attaches.
+/// `All` executes through `effects::attach`'s determined-set path: the prompt
+/// phase short-circuits it (no `EffectZoneChoice`) and the whole live matching
+/// set is bound before the executor's multi-attachment loop runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachCardinality {
@@ -15219,7 +15217,7 @@ pub enum AttachCardinality {
     /// CR 107.1c: "any number of <objects>" — zero or more.
     AnyNumber,
     /// "all <objects>" — every matching object (a determined set: no player
-    /// choice; the determined-set enumeration is the deferred seam, see the
+    /// choice; executed by `effects::attach`'s determined-set path, see the
     /// enum doc).
     All,
 }
@@ -15231,10 +15229,9 @@ impl AttachCardinality {
     }
 
     /// CR 107.1c + CR 608.2d: the target-count bounds this printed cardinality
-    /// imposes on the resolution-time attachment choice. `All` maps to the
-    /// legacy single-choice bounds because the determined-set enumeration does
-    /// not exist yet (see the enum doc); the mapping is behavior-preserving for
-    /// the four Attach instructions (three cards) that carry it today.
+    /// imposes on the resolution-time attachment CHOICE. A determined set
+    /// (`All`) never reaches the choice path — `effects::attach`'s prompt phase
+    /// executes it directly — so its arm here is a total-mapping fallback only.
     pub fn to_multi_target_spec(&self) -> MultiTargetSpec {
         match self {
             Self::One | Self::All => MultiTargetSpec::fixed(1, 1),

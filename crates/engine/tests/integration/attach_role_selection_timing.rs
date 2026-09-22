@@ -36,6 +36,7 @@ const ARDENN: &str = "At the beginning of combat on your turn, you may attach an
 const BRASS_SQUIRE: &str =
     "{T}: Attach target Equipment you control to target creature you control.";
 const SHATTER: &str = "Destroy target artifact.";
+const BALAN: &str = "First strike\nBalan has double strike as long as two or more Equipment are attached to it.\n{1}{W}: Attach all Equipment you control to Balan.";
 
 /// One interjected instant cast, answered at the first matching active-player
 /// priority window.
@@ -437,6 +438,135 @@ fn beatrix_declining_the_any_number_choice_attaches_nothing() {
         runner.state().objects[&host].attachments.is_empty(),
         "the announced host must receive nothing, got {:?}",
         runner.state().objects[&host].attachments
+    );
+}
+
+/// CR 107.1c + CR 608.2d: "attach all Equipment you control to Balan" is a
+/// DETERMINED set — EVERY matching Equipment attaches with NO player choice.
+/// Revert discriminator: without the determined-set path the resolution offers
+/// a single-choice `EffectZoneChoice` (two eligible) and only one attaches.
+#[test]
+fn balan_attaches_every_matching_equipment_without_a_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            engine::types::mana::ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ),
+            engine::types::mana::ManaUnit::new(
+                engine::types::mana::ManaType::White,
+                ObjectId(0),
+                false,
+                vec![],
+            ),
+        ],
+    );
+    let balan = scenario
+        .add_creature_from_oracle(P0, "Balan, Wandering Knight", 3, 3, BALAN)
+        .id();
+    let equipment_a = equipment(&mut scenario, "Sword A");
+    let equipment_b = equipment(&mut scenario, "Sword B");
+    // A second controller's Equipment is NOT in "Equipment you control".
+    let opposing_equipment = scenario
+        .add_artifact_from_oracle(P1, "Sword C", "Equipped creature gets +1/+0.")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let mut runner = scenario.build();
+
+    let ability_index = runner.state().objects[&balan]
+        .abilities
+        .iter()
+        .position(|ability| {
+            ability
+                .description
+                .as_deref()
+                .is_some_and(|d| d.contains("Attach all"))
+        })
+        .expect("Balan must carry the attach-all activated ability");
+    runner.activate(balan, ability_index).resolve();
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "a determined set must not prompt; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().objects[&equipment_a].attached_to,
+        Some(AttachTarget::Object(balan)),
+        "the first matching Equipment must attach"
+    );
+    assert_eq!(
+        runner.state().objects[&equipment_b].attached_to,
+        Some(AttachTarget::Object(balan)),
+        "the second matching Equipment must attach (the whole determined set)"
+    );
+    assert_eq!(
+        runner.state().objects[&balan].attachments.len(),
+        2,
+        "reach-guard: exactly the controller's two Equipment are attached, got {:?}",
+        runner.state().objects[&balan].attachments
+    );
+    assert_eq!(
+        runner.state().objects[&opposing_equipment].attached_to,
+        None,
+        "an opponent's Equipment is outside the printed set"
+    );
+}
+
+/// CR 608.2d: a determined set with nothing matching does nothing — no prompt,
+/// no error, no attachment.
+#[test]
+fn balan_with_no_equipment_does_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            engine::types::mana::ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ),
+            engine::types::mana::ManaUnit::new(
+                engine::types::mana::ManaType::White,
+                ObjectId(0),
+                false,
+                vec![],
+            ),
+        ],
+    );
+    let balan = scenario
+        .add_creature_from_oracle(P0, "Balan, Wandering Knight", 3, 3, BALAN)
+        .id();
+    let mut runner = scenario.build();
+
+    let ability_index = runner.state().objects[&balan]
+        .abilities
+        .iter()
+        .position(|ability| {
+            ability
+                .description
+                .as_deref()
+                .is_some_and(|d| d.contains("Attach all"))
+        })
+        .expect("Balan must carry the attach-all activated ability");
+    runner.activate(balan, ability_index).resolve();
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "an empty determined set must resolve quietly; got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().objects[&balan].attachments.is_empty(),
+        "nothing matches, so nothing attaches, got {:?}",
+        runner.state().objects[&balan].attachments
     );
 }
 
