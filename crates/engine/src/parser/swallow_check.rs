@@ -2701,13 +2701,18 @@ fn detect_dynamic_qty(
     if evidence.any::<PlayerFilter>(|p| matches!(p, PlayerFilter::VotedFor { .. })) {
         return;
     }
-    //   CR 702.139 / 702.41  Affinity-style built-in cost mods carry their scaling in the
-    //              keyword payload. Key-anchored through the shared `any_keyword` list
-    //              (`KEYWORD_KEYS`), the same one the Ward leg counts from, so the two
-    //              probes cannot drift onto different spellings of the same carrier.
-    if evidence.any_keyword(|k| matches!(k, Keyword::Affinity { .. })) {
-        return;
-    }
+    // CR 702.139 / 702.41  There is deliberately NO whole-unit Affinity exemption
+    //              here. Affinity's scaling text is REMINDER text ("This spell costs
+    //              {1} less to cast for each artifact you control"), which
+    //              `strip_parens` removes before any detector runs — so an Affinity
+    //              keyword in this unit can never be the source of a raised
+    //              "for each " occurrence, and a presence check could only ever
+    //              discharge an UNRELATED clause's dropped quantity (the same
+    //              false-green the Ward leg's occurrence-counted gate closes). A
+    //              future card that raises a marker the Affinity payload genuinely
+    //              represents needs an occurrence-counted association with the
+    //              keyword's own `TypedFilter`, not a presence check. Regression
+    //              test: `dynamic_qty_still_warns_for_a_sibling_marker_beside_affinity`.
     //   CR 702.21a + CR 608.2h + CR 113.7a  A Ward whose life payment is the
     //              warded permanent's power ("Ward—Pay life equal to ~'s power") is
     //              a dynamic quantity intrinsic to the `WardCost` variant: the power
@@ -9471,6 +9476,47 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             dynamic_qty_descriptions(&control_diagnostics).len(),
             1,
             "a granted fixed Ward represents no dynamic quantity: {control_diagnostics:?}"
+        );
+    }
+
+    /// CR 702.139 + CR 702.41: an Affinity keyword's scaling lives in its REMINDER
+    /// text ("This spell costs {1} less to cast for each artifact you control"), which
+    /// `strip_parens` removes before the detectors run — so an Affinity keyword in this
+    /// unit can never be the source of a raised "for each " occurrence, and no
+    /// whole-unit Affinity exemption exists (see `detect_dynamic_qty`). A sibling
+    /// clause whose "for each " is unrepresented must therefore still warn; the
+    /// removed presence-check leg suppressed it.
+    #[test]
+    fn dynamic_qty_still_warns_for_a_sibling_marker_beside_affinity() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+
+        let parsed = parsed_with_keywords(vec![Keyword::Affinity(TypedFilter::new(
+            TypeFilter::Artifact,
+        ))]);
+        let evidence = UnitEvidence::of(&parsed);
+        let cleaned = "affinity for artifacts. when this creature enters, create a treasure \
+                       token for each artifact you control.";
+        // Reach guard: the marker is raised and the Affinity keyword is visible to the
+        // unit's evidence, so a warning here cannot be vacuous.
+        assert!(
+            !super::active_dynamic_markers(cleaned, &evidence).is_empty(),
+            "fixture must raise the dynamic marker"
+        );
+        assert!(
+            evidence
+                .keywords()
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Affinity(_))),
+            "fixture must expose the Affinity keyword: {:?}",
+            evidence.keywords()
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut diagnostics);
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a sibling unrepresented \"for each \" clause beside an Affinity keyword must \
+             warn: {diagnostics:?}"
         );
     }
 

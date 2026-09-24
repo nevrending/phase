@@ -724,13 +724,11 @@ impl UnitEvidence {
     /// bare strings that would otherwise match unrelated string values anywhere in the
     /// tree).
     ///
-    /// The collecting sibling of [`Self::any_keyword`] and the ONE flat key list both
-    /// share, so a future flat `Keyword` probe cannot drift onto a second spelling. A
-    /// detector that must COUNT what a keyword payload represents — one represented
-    /// payment per carrier, so N raised marker occurrences need N carriers — cannot
-    /// answer its question from a boolean; it needs the payloads. Granted keywords
-    /// live under a typed parent field, not a flat key; collect them with
-    /// [`Self::granted_keywords`].
+    /// The flat collecting probe over `KEYWORD_KEYS`. A detector that must COUNT what a
+    /// keyword payload represents — one represented payment per carrier, so N raised
+    /// marker occurrences need N carriers — cannot answer its question from a boolean;
+    /// it needs the payloads. Granted keywords live under a typed parent field, not a
+    /// flat key; collect them with [`Self::granted_keywords`].
     pub(super) fn keywords(&self) -> Vec<crate::types::keywords::Keyword> {
         self.collect_at(KEYWORD_KEYS)
     }
@@ -757,15 +755,6 @@ impl UnitEvidence {
                 _ => None,
             })
             .collect()
-    }
-
-    /// Does any `Keyword` carrier on this unit satisfy `pred`? Key-anchored per
-    /// [`KEYWORD_KEYS`], the same list [`Self::keywords`] collects from.
-    pub(super) fn any_keyword(
-        &self,
-        pred: impl Fn(&crate::types::keywords::Keyword) -> bool,
-    ) -> bool {
-        self.any_at(KEYWORD_KEYS, pred)
     }
 }
 
