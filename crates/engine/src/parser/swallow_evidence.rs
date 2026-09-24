@@ -452,14 +452,20 @@ const ACTIVATION_RESTRICTION_KEYS: &[&str] = &[
 const STATIC_DEFINITION_KEYS: &[&str] =
     &["statics", "static_abilities", "static_def", "definition"];
 
-/// Every JSON key at which a `Keyword`-typed field is serialized.
+/// Every JSON key at which a `Vec<Keyword>` field is serialized.
 ///
 /// `Keyword` is EXTERNALLY tagged, so its unit variants are bare strings that would
 /// otherwise match unrelated string values anywhere in the tree — it MUST be probed
 /// key-anchored (see module docs, hazard 1). `extractedKeywords` is the camelCase
 /// serialization of `ParsedAbilities::extracted_keywords` (verified by probe: the
-/// snake_case spelling matches nothing); `keywords` covers a `Keyword` array carried
-/// by a nested definition (e.g. a granted keyword), which is the same carrier.
+/// snake_case spelling matches nothing); `keywords` covers a `Vec<Keyword>` carried
+/// by a nested definition (e.g. `Effect::Token.keywords`), which is the same carrier.
+///
+/// The singular `keyword` key is deliberately excluded: the fields that use it
+/// (`ContinuousModification::AddKeyword`, `StaticMode::CastWithKeyword` /
+/// `CantHaveKeyword`, `ParsedCondition::SourceLacksKeyword`) NAME a keyword in a
+/// grant, permission or prohibition — none of them carries a ward payment or any
+/// other quantity this probe family consumes.
 const KEYWORD_KEYS: &[&str] = &["extractedKeywords", "keywords"];
 
 /// One audit unit's lowered definitions, as a walkable tree with the prose removed.
@@ -716,12 +722,22 @@ impl UnitEvidence {
     /// bare strings that would otherwise match unrelated string values anywhere in the
     /// tree).
     ///
-    /// The collecting sibling of the `any_at::<Keyword>` presence checks. A detector
-    /// that must COUNT what a keyword payload represents — one represented payment per
-    /// carrier, so N raised marker occurrences need N carriers — cannot answer its
-    /// question from a boolean; it needs the payloads.
+    /// The collecting sibling of [`Self::any_keyword`] and the ONE key list both
+    /// share, so a future `Keyword` probe cannot drift onto a second spelling. A
+    /// detector that must COUNT what a keyword payload represents — one represented
+    /// payment per carrier, so N raised marker occurrences need N carriers — cannot
+    /// answer its question from a boolean; it needs the payloads.
     pub(super) fn keywords(&self) -> Vec<crate::types::keywords::Keyword> {
         self.collect_at(KEYWORD_KEYS)
+    }
+
+    /// Does any `Keyword` carrier on this unit satisfy `pred`? Key-anchored per
+    /// [`KEYWORD_KEYS`], the same list [`Self::keywords`] collects from.
+    pub(super) fn any_keyword(
+        &self,
+        pred: impl Fn(&crate::types::keywords::Keyword) -> bool,
+    ) -> bool {
+        self.any_at(KEYWORD_KEYS, pred)
     }
 }
 
