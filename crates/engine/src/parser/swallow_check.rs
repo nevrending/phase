@@ -2468,7 +2468,10 @@ fn dynamic_markers_are_all_recorded_unrecognized(
 /// CR 702.21a + CR 608.2h + CR 113.7a: how many dynamic ward payments a parsed
 /// `WardCost` represents — one per `PayLifeEqualToPower`, recursing through
 /// `Compound` so the comma-separated spelling ("Ward—{2}, Pay life equal to ~'s
-/// power", `oracle_keyword::parse_ward_cost`) counts exactly like the bare one.
+/// power", `oracle_keyword::parse_ward_cost`) counts exactly like the bare one at
+/// the parse level this detector audits. (The compound path's RUNTIME payment is
+/// separately incomplete — `ward_cost_to_ability_cost` charges only the first
+/// component — and is reported on this PR, not hidden here.)
 ///
 /// EXHAUSTIVE on purpose: a future `WardCost` variant must decide whether it
 /// represents a dynamic amount rather than defaulting into invisibility behind a `_`
@@ -2694,22 +2697,29 @@ fn detect_dynamic_qty(
         return;
     }
     //   CR 702.139 / 702.41  Affinity-style built-in cost mods carry their scaling in the
-    //              keyword payload. `Keyword` is EXTERNALLY tagged, so it is key-anchored
-    //              (array elements inherit their field's key).
-    if evidence.any_at::<Keyword>(&["extracted_keywords", "keywords"], |k| {
-        matches!(k, Keyword::Affinity { .. })
-    }) {
+    //              keyword payload. Key-anchored through the shared `any_keyword` list
+    //              (`KEYWORD_KEYS`), the same one the Ward leg counts from, so the two
+    //              probes cannot drift onto different spellings of the same carrier.
+    if evidence.any_keyword(|k| matches!(k, Keyword::Affinity { .. })) {
         return;
     }
     //   CR 702.21a + CR 608.2h + CR 113.7a  A Ward whose life payment is the
     //              warded permanent's power ("Ward—Pay life equal to ~'s power") is
     //              a dynamic quantity intrinsic to the `WardCost` variant: the power
-    //              is read as the ability resolves (608.2h / 113.7a), and
-    //              `ward_cost_to_ability_cost` resolves it to `AbilityCost::PayLife {
-    //              amount: Ref(Power { scope: Source }) }` at payment time. No
-    //              `QuantityExpr` field exists for the probes above to see, so the
-    //              variant itself is the evidence — but each payment discharges
-    //              exactly ONE raised " equal to " occurrence
+    //              is read as the ability resolves (608.2h / 113.7a), and for the
+    //              BARE `PayLifeEqualToPower` variant `ward_cost_to_ability_cost`
+    //              resolves it to `AbilityCost::PayLife { amount: Ref(Power { scope:
+    //              Source }) }` at payment time. The compound spelling
+    //              ("Ward—{2}, Pay life equal to ~'s power") is counted because its
+    //              PARSE-level representation is the same dynamic quantity — that is
+    //              the question this detector audits. Its runtime payment is
+    //              separately incomplete (`ward_cost_to_ability_cost` charges only
+    //              the first component: a pre-existing gap on Gisa, the Hellraiser /
+    //              Captain Howler, Sea Scourge / Ovika, Enigma Goliath, reported on
+    //              this PR rather than hidden by this leg). No `QuantityExpr` field
+    //              exists for the probes above to see, so the variant itself is the
+    //              evidence — but each payment discharges exactly ONE raised
+    //              " equal to " occurrence
     //              (`ward_power_life_payments_cover_all_equal_to_markers`), so a
     //              second, unrepresented " equal to "/"for each "/… clause in the
     //              same unit still warns. Cards: Raubahn, Bull of Ala Mhigo;
