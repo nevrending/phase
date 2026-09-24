@@ -43,7 +43,7 @@ use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
 use crate::types::game_state::RetargetScope;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaCost, ManaExpiry};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::ActivationExemption;
@@ -2632,6 +2632,27 @@ fn detect_dynamic_qty(
     //              (array elements inherit their field's key).
     if evidence.any_at::<Keyword>(&["extracted_keywords", "keywords"], |k| {
         matches!(k, Keyword::Affinity { .. })
+    }) {
+        return;
+    }
+    //   CR 702.21b + CR 702.21a  A Ward whose life payment is the warded
+    //              permanent's power ("Ward—Pay life equal to ~'s power") is a
+    //              dynamic quantity intrinsic to the `WardCost` variant: 702.21b
+    //              fixes the value at resolution, and `ward_cost_to_ability_cost`
+    //              resolves it to `AbilityCost::PayLife { amount:
+    //              Ref(Power { scope: Source }) }` at payment time. No
+    //              `QuantityExpr` field exists for the probes above to see, so
+    //              the variant itself is the evidence. `PayLifeEqualToPower` is
+    //              the ONLY dynamic `WardCost` (measured over the face pool: every
+    //              other parsed ward cost is Mana / fixed PayLife / DiscardCard /
+    //              Sacrifice / Waterbend / Compound / GetPlayerCounters). Cards:
+    //              Raubahn, Bull of Ala Mhigo; Phyrexian Fleshgorger.
+    //              Key-anchored on `extractedKeywords` — the camelCase serialization
+    //              of `ParsedAbilities::extracted_keywords`, verified by probe; the
+    //              `keywords` key covers a `Keyword` array carried by a nested
+    //              definition (e.g. a granted keyword), which is the same carrier.
+    if evidence.any_at::<Keyword>(&["extractedKeywords", "keywords"], |k| {
+        matches!(k, Keyword::Ward(WardCost::PayLifeEqualToPower))
     }) {
         return;
     }
@@ -5394,7 +5415,7 @@ mod tests {
         TargetFilter, TriggerCondition,
     };
     use crate::types::identifiers::TrackedSetId;
-    use crate::types::keywords::Keyword;
+    use crate::types::keywords::{Keyword, WardCost};
     use crate::types::mana::ManaCost;
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
@@ -9191,6 +9212,107 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 702.21b + CR 702.21a: a Ward whose life payment is the warded
+    /// permanent's power ("Ward—Pay life equal to ~'s power") is a dynamic
+    /// quantity intrinsic to the `WardCost::PayLifeEqualToPower` variant — the
+    /// value is fixed at resolution (702.21b) and `ward_cost_to_ability_cost`
+    /// resolves it to `AbilityCost::PayLife { amount: Ref(Power { Source }) }`.
+    /// No `QuantityExpr` field exists, so the " equal to " marker must NOT raise
+    /// a DynamicQty swallow warning; the variant itself is the carrier.
+    /// Reverting the evidence leg re-reds Raubahn, Bull of Ala Mhigo and
+    /// Phyrexian Fleshgorger, both of which carried a live warning in shipped
+    /// card data.
+    #[test]
+    fn dynamic_qty_accepts_ward_pay_life_equal_to_power() {
+        // Detector-liveness control, same run: a fixture whose dynamic quantity
+        // is genuinely dropped still warns, so the two greens below cannot be
+        // produced by a detector that never fires. (Drown in the Loch's modal
+        // bullets are the suite's pinned DynamicQty positive.)
+        let dropped = parse_named(
+            "Choose one \u{2014}\n\
+             \u{2022} Counter target spell with mana value less than or equal to the number of \
+             cards in its controller's graveyard.\n\
+             \u{2022} Destroy target creature with mana value less than or equal to the number of \
+             cards in its controller's graveyard.",
+            "Drown in the Loch",
+            &["Instant"],
+        );
+        assert!(
+            has_swallowed_detector(&dropped, "DynamicQty"),
+            "control: the DynamicQty detector must be live in this test"
+        );
+
+        // The real cards, parsed with the production keyword/type inputs so the
+        // fixture reaches the same branches the card-data pipeline does.
+        let raubahn_keywords = vec!["Ward".to_string()];
+        let fleshgorger_keywords = vec![
+            "Prototype".to_string(),
+            "Menace".to_string(),
+            "Lifelink".to_string(),
+            "Ward".to_string(),
+        ];
+        let cases = [
+            (
+                "Raubahn, Bull of Ala Mhigo",
+                "Ward\u{2014}Pay life equal to Raubahn's power.\n\
+                 Whenever Raubahn attacks, attach up to one target Equipment you \
+                 control to target attacking creature.",
+                &raubahn_keywords,
+                vec!["Legendary".to_string(), "Creature".to_string()],
+                vec!["Human".to_string(), "Warrior".to_string()],
+            ),
+            (
+                "Phyrexian Fleshgorger",
+                "Prototype {1}{B}{B} \u{2014} 3/3 (You may cast this spell with different mana \
+                 cost, color, and size. It keeps its abilities and types.)\n\
+                 Menace, lifelink\n\
+                 Ward\u{2014}Pay life equal to Phyrexian Fleshgorger's power.",
+                &fleshgorger_keywords,
+                vec!["Artifact".to_string(), "Creature".to_string()],
+                vec!["Phyrexian".to_string(), "Wurm".to_string()],
+            ),
+        ];
+        for (name, text, keywords, core_types, subtypes) in cases {
+            // Reach guard 1: the fixture raises the detector's " equal to "
+            // expectation — without it, green could mean the marker never fired.
+            assert!(
+                // allow-noncombinator: test fixture assertion on classified text
+                text.to_ascii_lowercase().contains(" equal to "),
+                "{name}: fixture must raise the detector's dynamic marker"
+            );
+            let parsed = parse_oracle_text(text, name, keywords, &core_types, &subtypes);
+            // Reach guard 2: the typed carrier the leg keys on is present, so a
+            // green result is the leg's doing rather than a parse failure.
+            assert!(
+                parsed
+                    .extracted_keywords
+                    .iter()
+                    .any(|keyword| matches!(keyword, Keyword::Ward(WardCost::PayLifeEqualToPower))),
+                "{name} must carry the dynamic Ward cost: {:?}",
+                parsed.extracted_keywords
+            );
+            // Reach guard 3: no `Unimplemented` root effect, which would make
+            // `check_swallowed_clauses` skip the unit and green the negative
+            // assertion vacuously.
+            assert!(
+                parsed
+                    .abilities
+                    .iter()
+                    .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+                    .all(|ability| !matches!(
+                        ability.effect.as_ref(),
+                        Effect::Unimplemented { .. }
+                    )),
+                "{name}: no Unimplemented root effect may suppress the unit"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "DynamicQty"),
+                "{name} must not report a swallowed dynamic quantity: {:?}",
+                parsed.parse_warnings
+            );
+        }
     }
 
     /// CR 702.143d: Singing Towers of Darillium grants foretell whose cost is
