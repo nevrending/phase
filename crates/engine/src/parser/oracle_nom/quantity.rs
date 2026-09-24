@@ -3422,13 +3422,16 @@ enum LifeChangeDirection {
 }
 
 /// CR 119.3 + CR 608.2c + CR 608.2h: Parse a "for each" player-population
-/// clause qualified by a life-change predicate — "(of your) opponents/players
-/// who lost/gained life this turn". Reached by the for-each clause path
-/// (Belbe, Corrupted Observer: "{C}{C} for each of your opponents who lost
-/// life this turn"; Reaper's Scythe: "put a soul counter on this Equipment for
-/// each player who lost life this turn"). The leading "of your "/"of " is
-/// optional. Population and direction are independent `alt()` axes — no
-/// permutation enumeration.
+/// clause qualified by a life-change predicate — "(of your) opponents who
+/// lost/gained life this turn" and "players who lost/gained life this turn".
+/// Reached by the for-each clause path (Belbe, Corrupted Observer: "{C}{C} for
+/// each of your opponents who lost life this turn"; Reaper's Scythe: "put a
+/// soul counter on this Equipment for each player who lost life this turn").
+/// Population and direction are independent `alt()` axes — no permutation
+/// enumeration. The possessive "of your "/"of " prefix is part of the OPPONENT
+/// arm only: "for each of your opponents who …" is the printed grammar, while
+/// the all-players spelling is bare ("for each player who …"); no card says
+/// "of your players who …".
 ///
 /// The two populations carry the same predicate but different existing wire
 /// forms: the opponent spellings keep their dedicated
@@ -3442,18 +3445,20 @@ enum LifeChangeDirection {
 /// and it correctly includes the ability's controller — "each player" is not
 /// "each opponent".
 fn parse_for_each_life_change_players(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = opt(alt((tag("of your "), tag("of ")))).parse(input)?;
     // Population axis: singular and plural spellings of the same population
     // resolve identically (Gev, Scaled Scorch's singular "opponent who lost
     // life this turn" and Belbe's plural "opponents who …").
     let (rest, relation) = alt((
-        value(
-            PlayerRelation::Opponent,
-            alt((tag("opponents "), tag("opponent "))),
+        preceded(
+            opt(alt((tag("of your "), tag("of ")))),
+            value(
+                PlayerRelation::Opponent,
+                alt((tag("opponents "), tag("opponent "))),
+            ),
         ),
         value(PlayerRelation::All, alt((tag("players "), tag("player ")))),
     ))
-    .parse(rest)?;
+    .parse(input)?;
     let (rest, direction) = alt((
         value(LifeChangeDirection::Lost, tag("who lost life this turn")),
         value(
@@ -7829,19 +7834,11 @@ mod tests {
                 life_lost_this_turn_attr(),
             ),
             (
-                "of your players who lost life this turn",
-                life_lost_this_turn_attr(),
-            ),
-            (
                 "player who gained life this turn",
                 life_gained_this_turn_attr(),
             ),
             (
                 "players who gained life this turn",
-                life_gained_this_turn_attr(),
-            ),
-            (
-                "of your player who gained life this turn",
                 life_gained_this_turn_attr(),
             ),
         ] {
@@ -7854,6 +7851,8 @@ mod tests {
 
     #[test]
     fn parse_for_each_life_change_players_rejects_suffix_and_wrong_duration() {
+        // Positive reach guard: the opponent spelling (whose possessive prefix
+        // the all-players spelling must NOT inherit) parses in this same test.
         let (rest, qty) = parse_for_each_clause_ref_complete("opponent who lost life this turn")
             .expect("positive life-change phrase should reach parser");
         assert_eq!(rest, "");
@@ -7873,6 +7872,18 @@ mod tests {
             "player who lost life this turn and controls a creature"
         )
         .is_err());
+        // CR 119.3: the "of your "/"of " possessive is opponent-only grammar
+        // ("for each of your opponents who …"); the all-players spelling is
+        // bare, so the possessive forms must NOT parse (no card prints them).
+        assert!(
+            parse_for_each_clause_ref_complete("of your players who lost life this turn").is_err()
+        );
+        assert!(
+            parse_for_each_clause_ref_complete("of your player who gained life this turn").is_err()
+        );
+        assert!(
+            parse_for_each_clause_ref_complete("of players who gained life this turn").is_err()
+        );
     }
 
     #[test]

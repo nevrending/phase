@@ -9268,7 +9268,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
                 "Prototype {1}{B}{B} \u{2014} 3/3 (You may cast this spell with different mana \
                  cost, color, and size. It keeps its abilities and types.)\n\
                  Menace, lifelink\n\
-                 Ward\u{2014}Pay life equal to Phyrexian Fleshgorger's power.",
+                 Ward\u{2014}Pay life equal to this creature's power.",
                 &fleshgorger_keywords,
                 vec!["Artifact".to_string(), "Creature".to_string()],
                 vec!["Phyrexian".to_string(), "Wurm".to_string()],
