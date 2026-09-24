@@ -452,6 +452,16 @@ const ACTIVATION_RESTRICTION_KEYS: &[&str] = &[
 const STATIC_DEFINITION_KEYS: &[&str] =
     &["statics", "static_abilities", "static_def", "definition"];
 
+/// Every JSON key at which a `Keyword`-typed field is serialized.
+///
+/// `Keyword` is EXTERNALLY tagged, so its unit variants are bare strings that would
+/// otherwise match unrelated string values anywhere in the tree — it MUST be probed
+/// key-anchored (see module docs, hazard 1). `extractedKeywords` is the camelCase
+/// serialization of `ParsedAbilities::extracted_keywords` (verified by probe: the
+/// snake_case spelling matches nothing); `keywords` covers a `Keyword` array carried
+/// by a nested definition (e.g. a granted keyword), which is the same carrier.
+const KEYWORD_KEYS: &[&str] = &["extractedKeywords", "keywords"];
+
 /// One audit unit's lowered definitions, as a walkable tree with the prose removed.
 ///
 /// Built once per unit and shared by every detector — the same one-serialization-per-unit
@@ -653,14 +663,16 @@ impl UnitEvidence {
     ///
     /// The collecting sibling of [`Self::any_at`], with the identical key-anchoring
     /// contract — use it when a detector needs the carrier's *payload* rather than
-    /// just its presence. The only such fact today is the recorded text on a
-    /// `StaticCondition::Unrecognized`: "which source text did the parser explicitly
-    /// admit it could not parse?" cannot be answered by a boolean.
+    /// just its presence. Two such facts today: the recorded text on a
+    /// `StaticCondition::Unrecognized` ("which source text did the parser explicitly
+    /// admit it could not parse?" cannot be answered by a boolean), read through
+    /// [`Self::static_definition_conditions`]; and the `Keyword` payloads whose count
+    /// a detector consumes, read through [`Self::keywords`].
     ///
     /// Anchor on the key of the **carrier that owns the payload's field**, not on the
     /// payload's own key, whenever the payload type is not self-discriminating. See
-    /// [`Self::static_definition_conditions`], the one caller, for why: the payload
-    /// there is a `StaticCondition`, whose `Unrecognized` variant is field-identical to
+    /// [`Self::static_definition_conditions`] for why: the payload there is a
+    /// `StaticCondition`, whose `Unrecognized` variant is field-identical to
     /// `ReplacementCondition::Unrecognized`, and both live under the same bare key
     /// `condition`.
     fn collect_at<T: DeserializeOwned>(&self, keys: &[&str]) -> Vec<T> {
@@ -697,6 +709,19 @@ impl UnitEvidence {
             .into_iter()
             .filter_map(|def| def.condition)
             .collect()
+    }
+
+    /// Every `Keyword` carrier on this unit, in walk order — key-anchored per
+    /// [`KEYWORD_KEYS`] because `Keyword` is externally tagged (its unit variants are
+    /// bare strings that would otherwise match unrelated string values anywhere in the
+    /// tree).
+    ///
+    /// The collecting sibling of the `any_at::<Keyword>` presence checks. A detector
+    /// that must COUNT what a keyword payload represents — one represented payment per
+    /// carrier, so N raised marker occurrences need N carriers — cannot answer its
+    /// question from a boolean; it needs the payloads.
+    pub(super) fn keywords(&self) -> Vec<crate::types::keywords::Keyword> {
+        self.collect_at(KEYWORD_KEYS)
     }
 }
 
