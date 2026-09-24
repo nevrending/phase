@@ -2524,9 +2524,14 @@ fn ward_power_life_payments_cover_all_equal_to_markers(
     let raised = cleaned.matches(" equal to ").count();
     let represented: usize = evidence
         .keywords()
-        .iter()
+        .into_iter()
+        // CR 702.21a: a granted Ward ("Other creatures you control have ward—pay
+        // life equal to ~'s power") carries the same payment under
+        // `ContinuousModification::AddKeyword`, reached through the typed parent
+        // carrier — see `UnitEvidence::granted_keywords`.
+        .chain(evidence.granted_keywords())
         .map(|keyword| match keyword {
-            Keyword::Ward(cost) => ward_power_life_payments(cost),
+            Keyword::Ward(cost) => ward_power_life_payments(&cost),
             // Every non-Ward keyword represents no ward payment.
             _ => 0,
         })
@@ -9385,6 +9390,88 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
                 parsed.parse_warnings
             );
         }
+    }
+
+    /// CR 702.21a + CR 608.2h + CR 113.7a: a dynamic Ward GRANTED to other
+    /// permanents ("Other creatures you control have ward—Pay life equal to ~'s
+    /// power") parses to `ContinuousModification::AddKeyword { Ward(
+    /// PayLifeEqualToPower) }`, so the Ward leg must count it from the typed grant
+    /// carrier (`UnitEvidence::granted_keywords`) and stay silent. The control — the
+    /// same text with the same-shaped grant carrying a FIXED Ward — does not
+    /// represent the dynamic quantity, so the warning must still fire.
+    #[test]
+    fn dynamic_qty_accepts_granted_ward_pay_life_equal_to_power() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+
+        let text = "Other creatures you control have ward\u{2014}pay life equal to ~'s power.";
+
+        // Production parse: the grant lowers to AddKeyword(Ward(PayLifeEqualToPower)).
+        let granted = parse_named(text, "Test Grantor", &["Creature"]);
+        assert!(
+            granted
+                .statics
+                .iter()
+                .any(|stat| stat.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Ward(WardCost::PayLifeEqualToPower)
+                    }
+                ))),
+            "reach guard: the production parser must lower the granted dynamic ward \
+             to AddKeyword(Ward(PayLifeEqualToPower)): {:?}",
+            granted.statics
+        );
+        let evidence = UnitEvidence::of(&granted);
+        let cleaned = text.to_ascii_lowercase();
+        assert!(
+            !super::active_dynamic_markers(&cleaned, &evidence).is_empty(),
+            "fixture must raise the dynamic marker"
+        );
+        // Reach guard: the typed grant carrier exposes the payment to the counting path.
+        assert!(
+            !evidence.granted_keywords().is_empty(),
+            "evidence must expose the granted keyword"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(&cleaned, &cleaned, &evidence, &mut diagnostics);
+        assert!(
+            dynamic_qty_descriptions(&diagnostics).is_empty(),
+            "a granted power-life Ward must not report DynamicQty: {diagnostics:?}"
+        );
+
+        // Control: the same text with a fixed-cost grant. Nothing represents the
+        // raised " equal to " occurrence, so the warning must fire.
+        let mut fixed_static = StaticDefinition::new(StaticMode::Continuous);
+        fixed_static.modifications = vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Ward(WardCost::PayLife(2)),
+        }];
+        let control = crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: vec![fixed_static],
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        };
+        let control_evidence = UnitEvidence::of(&control);
+        let mut control_diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            &cleaned,
+            &cleaned,
+            &control_evidence,
+            &mut control_diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&control_diagnostics).len(),
+            1,
+            "a granted fixed Ward represents no dynamic quantity: {control_diagnostics:?}"
+        );
     }
 
     /// A minimal `ParsedAbilities` carrying exactly the given extracted keywords and
