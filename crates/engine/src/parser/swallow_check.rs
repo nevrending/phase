@@ -2701,7 +2701,7 @@ fn detect_dynamic_qty(
     if evidence.any::<PlayerFilter>(|p| matches!(p, PlayerFilter::VotedFor { .. })) {
         return;
     }
-    // CR 702.139 / 702.41  There is deliberately NO whole-unit Affinity exemption
+    // CR 702.41  There is deliberately NO whole-unit Affinity exemption
     //              here. Affinity's scaling text is REMINDER text ("This spell costs
     //              {1} less to cast for each artifact you control"), which
     //              `strip_parens` removes before any detector runs — so an Affinity
@@ -9479,8 +9479,8 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
     }
 
-    /// CR 702.139 + CR 702.41: an Affinity keyword's scaling lives in its REMINDER
-    /// text ("This spell costs {1} less to cast for each artifact you control"), which
+    /// CR 702.41: an Affinity keyword's scaling lives in its REMINDER text ("This
+    /// spell costs {1} less to cast for each artifact you control"), which
     /// `strip_parens` removes before the detectors run — so an Affinity keyword in this
     /// unit can never be the source of a raised "for each " occurrence, and no
     /// whole-unit Affinity exemption exists (see `detect_dynamic_qty`). A sibling
