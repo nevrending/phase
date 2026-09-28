@@ -2466,12 +2466,19 @@ fn dynamic_markers_are_all_recorded_unrecognized(
 }
 
 /// CR 702.21a + CR 608.2h + CR 113.7a: how many dynamic ward payments a parsed
-/// `WardCost` represents — one per `PayLifeEqualToPower`, recursing through
-/// `Compound` so the comma-separated spelling ("Ward—{2}, Pay life equal to ~'s
-/// power", `oracle_keyword::parse_ward_cost`) counts exactly like the bare one at
-/// the parse level this detector audits. (The compound path's RUNTIME payment is
-/// separately incomplete — `ward_cost_to_ability_cost` charges only the first
-/// component — and is reported on this PR, not hidden here.)
+/// `WardCost` actually REPRESENTS AT RUNTIME — one for the bare
+/// `PayLifeEqualToPower`, and zero for every other shape.
+///
+/// **`Compound` deliberately counts zero, and is not recursed into.**
+/// `ward_cost_to_ability_cost` (`game/triggers.rs`) converts only `costs.first()`
+/// of a compound cost, with the remaining components explicitly deferred — so for
+/// `Compound([Mana({2}), PayLifeEqualToPower])` the engine asks for {2} and drops
+/// the life payment. Counting the nested payment here would discharge the very
+/// `" equal to "` marker that flags the dropped quantity. The compound spelling
+/// therefore stays DIAGNOSED (conservative-red) until the runtime charges every
+/// component; when it does, this arm flips back to a recursive count. No printed
+/// card is affected today: no printed compound ward spelling carries a dynamic
+/// component (the printed compounds are fixed-cost, e.g. "Ward—{2}, Pay 2 life").
 ///
 /// EXHAUSTIVE on purpose: a future `WardCost` variant must decide whether it
 /// represents a dynamic amount rather than defaulting into invisibility behind a `_`
@@ -2480,13 +2487,13 @@ fn dynamic_markers_are_all_recorded_unrecognized(
 fn ward_power_life_payments(cost: &WardCost) -> usize {
     match cost {
         WardCost::PayLifeEqualToPower => 1,
-        WardCost::Compound(parts) => parts.iter().map(ward_power_life_payments).sum(),
         WardCost::Mana(_)
         | WardCost::PayLife(_)
         | WardCost::DiscardCard
         | WardCost::Sacrifice { .. }
         | WardCost::Waterbend(_)
-        | WardCost::GetPlayerCounters { .. } => 0,
+        | WardCost::GetPlayerCounters { .. }
+        | WardCost::Compound(_) => 0,
     }
 }
 
@@ -9559,56 +9566,59 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
 
     /// CR 702.21a + CR 608.2h + CR 113.7a: a Compound Ward cost whose components
     /// include `PayLifeEqualToPower` ("Ward—{2}, Pay life equal to ~'s power", the
-    /// comma-separated form `oracle_keyword::parse_ward_cost` lowers) represents the
-    /// same dynamic payment as the bare spelling, so the DynamicQty detector must
-    /// stay silent. The discriminating control — the same text with a Compound that
-    /// carries NO power-life payment — must still warn, proving the silence comes
-    /// from the recursive count and not from the text or the marker gate.
+    /// comma-separated form `oracle_keyword::parse_ward_cost` lowers) is NOT
+    /// exempted. `ward_cost_to_ability_cost` charges only `costs.first()` of a
+    /// compound, so for this exact shape the engine asks for {2} and drops the life
+    /// payment: the dynamic quantity is not represented at runtime, and suppressing
+    /// the warning would hide the drop. The compound spelling therefore stays
+    /// diagnosed (conservative-red) until every component is charged. Reverting
+    /// `ward_power_life_payments` to recurse into `Compound` fails this test.
     #[test]
-    fn dynamic_qty_accepts_compound_ward_with_power_life_payment() {
-        let with_power = parsed_with_keywords(vec![Keyword::Ward(WardCost::Compound(vec![
+    fn dynamic_qty_flags_compound_ward_with_power_life_payment() {
+        let compound = parsed_with_keywords(vec![Keyword::Ward(WardCost::Compound(vec![
             WardCost::Mana(ManaCost::generic(2)),
             WardCost::PayLifeEqualToPower,
         ]))]);
-        let evidence = UnitEvidence::of(&with_power);
+        let evidence = UnitEvidence::of(&compound);
 
         let cleaned = "ward\u{2014}{2}, pay life equal to ~'s power.";
-        // Reach guard: the fixture raises the " equal to " marker the leg keys on,
-        // or the silence below could just mean the detector never engaged.
+        // Reach guards: the fixture raises the " equal to " marker, and the compound
+        // carrier with its dynamic component is visible to the evidence probe — so
+        // the warning below is a verdict on the carrier, not a fixture that never
+        // engaged.
         assert!(
             !super::active_dynamic_markers(cleaned, &evidence).is_empty(),
             "fixture must raise the dynamic marker"
         );
+        assert!(
+            evidence.keywords().iter().any(|keyword| matches!(
+                keyword,
+                Keyword::Ward(WardCost::Compound(parts))
+                    if parts.contains(&WardCost::PayLifeEqualToPower)
+            )),
+            "fixture must expose the compound carrier with its dynamic component: {:?}",
+            evidence.keywords()
+        );
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut diagnostics);
-        assert!(
-            dynamic_qty_descriptions(&diagnostics).is_empty(),
-            "a compound Ward with a power-life payment must not report DynamicQty: {diagnostics:?}"
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a compound Ward whose dynamic component is not charged must stay flagged: \
+             {diagnostics:?}"
         );
 
-        // Discriminating control: same text, compound WITHOUT the power-life
-        // payment. The marker is still raised and nothing else carries it, so the
-        // warning must fire.
-        let without_power = parsed_with_keywords(vec![Keyword::Ward(WardCost::Compound(vec![
-            WardCost::Mana(ManaCost::generic(2)),
-            WardCost::PayLife(2),
-        ]))]);
-        let control_evidence = UnitEvidence::of(&without_power);
+        // Control: the BARE spelling of the same payment IS fully charged, so the
+        // same text is silent — proving the warning above is about the compound
+        // carrier, not about the text or the marker gate.
+        let bare = UnitEvidence::of(&parsed_with_keywords(vec![Keyword::Ward(
+            WardCost::PayLifeEqualToPower,
+        )]));
+        let mut bare_diagnostics = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &bare, &mut bare_diagnostics);
         assert!(
-            !super::active_dynamic_markers(cleaned, &control_evidence).is_empty(),
-            "control fixture must raise the dynamic marker"
-        );
-        let mut control_diagnostics = Vec::new();
-        super::detect_dynamic_qty(
-            cleaned,
-            cleaned,
-            &control_evidence,
-            &mut control_diagnostics,
-        );
-        assert_eq!(
-            dynamic_qty_descriptions(&control_diagnostics).len(),
-            1,
-            "the compound without a power-life payment must warn: {control_diagnostics:?}"
+            dynamic_qty_descriptions(&bare_diagnostics).is_empty(),
+            "the bare spelling must stay silent: {bare_diagnostics:?}"
         );
     }
 
