@@ -2727,15 +2727,18 @@ fn detect_dynamic_qty(
     //              BARE `PayLifeEqualToPower` variant `ward_cost_to_ability_cost`
     //              resolves it to `AbilityCost::PayLife { amount: Ref(Power { scope:
     //              Source }) }` at payment time. The compound spelling
-    //              ("Ward—{2}, Pay life equal to ~'s power") is counted because its
-    //              PARSE-level representation is the same dynamic quantity — that is
-    //              the question this detector audits. Its runtime payment is
-    //              separately incomplete (`ward_cost_to_ability_cost` charges only
-    //              the first component: a pre-existing gap on Gisa, the Hellraiser /
-    //              Captain Howler, Sea Scourge / Ovika, Enigma Goliath, reported on
-    //              this PR rather than hidden by this leg). No `QuantityExpr` field
-    //              exists for the probes above to see, so the variant itself is the
-    //              evidence — but each payment discharges exactly ONE raised
+    //              ("Ward—{2}, Pay life equal to ~'s power") is NOT counted: the
+    //              runtime charges only `costs.first()` of a compound, so for that
+    //              shape the life payment is dropped and the quantity is not
+    //              represented — the marker must stay diagnosed (conservative-red)
+    //              until every component is charged. See `ward_power_life_payments`
+    //              for the full rationale and the reversal condition. (The
+    //              fixed-cost printed compounds — Gisa, the Hellraiser / Captain
+    //              Howler, Sea Scourge / Ovika, Enigma Goliath — raise no dynamic
+    //              marker at all; their dropped non-first components remain a
+    //              pre-existing runtime gap, reported on this PR.) No `QuantityExpr`
+    //              field exists for the probes above to see, so the variant itself is
+    //              the evidence — but each payment discharges exactly ONE raised
     //              " equal to " occurrence
     //              (`ward_power_life_payments_cover_all_equal_to_markers`), so a
     //              second, unrepresented " equal to "/"for each "/… clause in the
