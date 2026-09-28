@@ -8489,10 +8489,22 @@ where
 /// In the generic player loop, every other filter counts only players still in
 /// the game.
 fn player_filter_reads_life_history(filter: &PlayerFilter) -> bool {
-    matches!(
-        filter,
-        PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife
-    )
+    match filter {
+        PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife => true,
+        // CR 119.3 + CR 800.4i: the all-players spelling of the same predicate
+        // ("for each player who lost/gained life this turn", Reaper's Scythe /
+        // Strefan) carries the scalar on the general per-candidate carrier. The
+        // departed-player ruling belongs to the life-change ATTRIBUTE, not to
+        // the dedicated opponent variant, so it applies here too. Deliberately
+        // narrow: other `PlayerAttribute` scalars (hand size, graveyard size,
+        // player counters, …) keep excluding departed players, matching the
+        // `AllPlayers` aggregate form in `resolve_per_player_life_history`.
+        PlayerFilter::PlayerAttribute { attr, .. } => matches!(
+            attr.as_ref(),
+            QuantityRef::LifeLostThisTurn { .. } | QuantityRef::LifeGainedThisTurn { .. }
+        ),
+        _ => false,
+    }
 }
 
 /// CR 101.4 + CR 608.2d: `resolve_per_player_scalar` for a scalar that some
@@ -16306,6 +16318,66 @@ mod tests {
             resolve_quantity(&state, &per_each, PlayerId(0), ObjectId(1)),
             2,
             "controller and opp2 gained life; opp1 did not"
+        );
+    }
+
+    /// CR 119.3 + CR 800.4i: the all-players spelling of the life-change
+    /// predicate counts a player who has since LEFT the game, exactly like the
+    /// dedicated `OpponentLostLife` variant does (Belbe/Teysa/Kaito rulings:
+    /// an effect can find actions taken by a player who has left the game).
+    /// 3-player board: P1 lost life and was then eliminated; P0 lost life and
+    /// is still in the game; P2 lost none. Expect 2.
+    ///
+    /// Revert discriminator: dropping the `PlayerAttribute` arm from
+    /// `player_filter_reads_life_history` makes the generic loop skip the
+    /// eliminated P1, so this test observes 1 — while the sibling
+    /// `resolve_player_count_all_players_who_lost_life_includes_the_controller`
+    /// stays green, which is exactly the divergence this arm closes.
+    #[test]
+    fn resolve_player_count_all_players_life_change_includes_eliminated_players() {
+        use crate::types::ability::{Comparator, PlayerRelation, PlayerScope};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[0].life_lost_this_turn = 1; // controller — counts
+        state.players[1].life_lost_this_turn = 2; // eliminated — still counts
+        state.players[2].life_lost_this_turn = 0; // excluded
+        state.players[1].is_eliminated = true;
+
+        let lost_life = |attr: QuantityRef| QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(attr),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            },
+        };
+
+        let per_each = lost_life(QuantityRef::LifeLostThisTurn {
+            player: PlayerScope::ScopedPlayer,
+        });
+        assert_eq!(
+            resolve_quantity(&state, &per_each, PlayerId(0), ObjectId(1)),
+            2,
+            "the eliminated player's recorded loss must still be found"
+        );
+
+        // Control: a NON-life-history `PlayerAttribute` scalar keeps excluding
+        // the eliminated player, so the widening above cannot have been
+        // "count everyone". Give the eliminated player cards in hand and read
+        // hand size: only the two live players count.
+        state.players[0].hand.push_back(ObjectId(9001));
+        state.players[1].hand.push_back(ObjectId(9002));
+        state.players[2].hand.push_back(ObjectId(9003));
+        let hand_size = lost_life(QuantityRef::HandSize {
+            player: PlayerScope::ScopedPlayer,
+        });
+        assert_eq!(
+            resolve_quantity(&state, &hand_size, PlayerId(0), ObjectId(1)),
+            2,
+            "hand-size candidates still exclude the eliminated player"
         );
     }
 
