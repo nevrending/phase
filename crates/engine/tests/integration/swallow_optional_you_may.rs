@@ -62,7 +62,7 @@ const CASE_OF_THE_UNEATEN_FEAST_ORACLE: &str = "Whenever a creature you control 
      Solved — Sacrifice this Case: Creature cards in your graveyard gain \"You may cast \
      this card from your graveyard\" until end of turn.";
 
-/// Drach'Nyen — a five-word ability word ("Echo of the First Murder", CR 207.2c)
+/// Drach'Nyen — a five-word flavor word ("Echo of the First Murder", CR 207.2d)
 /// whose label also begins with the `echo` keyword-cost prefix. The wider
 /// flavor-word cap (six words) must keep claiming the line as a trigger, and the
 /// label decline must not reach it.
@@ -368,7 +368,7 @@ fn kethis_and_case_of_the_uneaten_feast_stay_red_honest() {
     }
 }
 
-/// CR 207.2c: Drach'Nyen's five-word ability word is beyond the label-decline
+/// CR 207.2d: Drach'Nyen's five-word flavor word is beyond the label-decline
 /// width, and trigger lines are claimed by the ability-word trigger route before
 /// the keyword-cost router anyway — the labeled trigger body must still parse.
 #[test]

@@ -905,7 +905,7 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // Veil's "you may activate one of its loyalty abilities once this turn"
         // is the permission itself; the player still decides each activation.
         | Effect::GrantExtraLoyaltyActivations { .. } => true,
-        // CR 706.1 + CR 706.2: "Roll a d20." with a printed result table carries
+        // CR 706.3a + CR 706.3b: "Roll a d20." with a printed result table carries
         // its "you may" inside a result BRANCH definition ("1—9 | Copy that card.
         // You may cast the copy." — Wizard's Spellbook), not at the RollDie
         // effect's own def. The branches are `DieResultBranch` payloads, which
@@ -9043,7 +9043,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
-    /// CR 706.1 + CR 706.2: a d20 result branch's own definition carries the
+    /// CR 706.3a + CR 706.3b: a d20 result branch's own definition carries the
     /// "you may" the branch prints ("1—9 | Copy that card. You may cast the
     /// copy."). Before the `RollDie` recursion, `effect_has_internal_optionality`
     /// could not see into `results` — they are `DieResultBranch` payloads, not
@@ -9479,7 +9479,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// (`for_each_card_type_constraints_cover_all_for_each_markers`), not a
     /// `QuantityExpr`. Both warnings must therefore clear.
     #[test]
-    fn optional_you_may_atraxa_grand_unifier_reports_known_gap() {
+    fn optional_you_may_atraxa_grand_unifier_clears_optionality_and_quantity_gaps() {
         let parsed = parse_named(
             ATRAXA_GRAND_UNIFIER_ORACLE,
             "Atraxa, Grand Unifier",
@@ -10237,7 +10237,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// guard must be able to name: `Effect::Mana.grants[].ability` (a CR 603.3
     /// spend trigger that resolves later, so the shared visitor deliberately does
     /// not descend for conjure purposes) and `Effect::RollDie.results[].effect`
-    /// (a CR 706.2 result branch, not a `sub_ability`). Reach guard only — never
+    /// (a CR 706.3a result-branch striation, not a `sub_ability`). Reach guard only — never
     /// a parser or resolver authority.
     fn def_tree_has_effect(def: &AbilityDefinition, pred: &impl Fn(&Effect) -> bool) -> bool {
         if pred(&def.effect) {
