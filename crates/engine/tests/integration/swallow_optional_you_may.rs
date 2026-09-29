@@ -28,7 +28,13 @@ use engine::game::casting::{can_cast_object_now, spell_objects_available_to_cast
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
 use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use engine::types::ability::{CardPlayMode, ContinuousModification, Effect, StaticCondition};
+use engine::types::ability::{
+    CardPlayMode, ContinuousModification, Effect, QuantityExpr, StaticCondition, TargetFilter,
+    TypeFilter,
+};
+use engine::types::ability_visit::{
+    visit_ability_def, visit_replacement, visit_static, visit_trigger,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -40,6 +46,7 @@ use engine::types::replacements::ReplacementEvent;
 use engine::types::statics::{CastFrequency, StaticMode};
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
+use std::ops::ControlFlow;
 
 const HADES_ORACLE: &str = "Vigilance\n\
     Echo of the Lost — During your turn, you may play cards from your graveyard.\n\
@@ -97,6 +104,37 @@ fn has_swallowed_detector(parsed: &ParsedAbilities, detector: &str) -> bool {
             } if warning_detector == detector
         )
     })
+}
+
+/// Does any ability tree in the parse contain an `Effect::Unimplemented`?
+/// Walks the engine's single-authority visitor (`engine::types::ability_visit`)
+/// over every top-level unit — abilities, trigger executes, statics, and
+/// replacements — so an `Unimplemented` short-circuit in a nested carrier is
+/// detected instead of leaving the swallow negatives vacuous.
+fn tree_has_unimplemented(parsed: &ParsedAbilities) -> bool {
+    let mut visitor = |effect: &Effect| {
+        if matches!(effect, Effect::Unimplemented { .. }) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    parsed
+        .abilities
+        .iter()
+        .any(|def| visit_ability_def(def, &mut visitor).is_break())
+        || parsed
+            .triggers
+            .iter()
+            .any(|trigger| visit_trigger(trigger, &mut visitor).is_break())
+        || parsed
+            .statics
+            .iter()
+            .any(|static_def| visit_static(static_def, &mut visitor).is_break())
+        || parsed
+            .replacements
+            .iter()
+            .any(|replacement| visit_replacement(replacement, &mut visitor).is_break())
 }
 
 /// Is the unit's rules-bearing graveyard permission carried as
@@ -388,6 +426,55 @@ fn labeled_trigger_body_still_parses() {
         "the labeled enters trigger must parse, got {:#?}",
         parsed.triggers
     );
+
+    // Reach guard: the whole parse is complete — no unit hides an
+    // `Effect::Unimplemented` that would leave the `ChangesZone` mode green
+    // while `check_swallowed_clauses` skips the unit, making the negative
+    // below vacuous.
+    assert!(
+        !tree_has_unimplemented(&parsed),
+        "reach: Drach'Nyen must parse with zero Unimplemented: {parsed:#?}"
+    );
+
+    // The labeled trigger's body is the real effect, not an Unimplemented
+    // stand-in: "exile up to one target creature" parses as an Exile
+    // `ChangeZone` over a Creature filter with a 0..=1 multi-target spec.
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| matches!(trigger.mode, TriggerMode::ChangesZone))
+        .expect("reach: the labeled enters trigger must parse");
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("reach: the labeled trigger must carry an execute body");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(type_filter),
+                ..
+            } if type_filter.type_filters.contains(&TypeFilter::Creature)
+        ),
+        "the labeled trigger body must be the real exile effect, got {:#?}",
+        execute.effect
+    );
+    let multi_target = execute
+        .multi_target
+        .as_ref()
+        .expect("reach: 'exile up to one target creature' must carry a MultiTargetSpec");
+    assert_eq!(
+        multi_target.min,
+        QuantityExpr::Fixed { value: 0 },
+        "'up to one' must allow zero targets"
+    );
+    assert_eq!(
+        multi_target.max,
+        Some(QuantityExpr::Fixed { value: 1 }),
+        "'up to one' must cap the target count at one"
+    );
+
     assert!(
         !parsed
             .parse_warnings

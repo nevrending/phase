@@ -9331,6 +9331,10 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             "reach: Ballot Broker's static must parse as GrantsExtraVote, got {:#?}",
             ballot_broker.statics
         );
+        assert!(
+            !any_ability_has_unimplemented(&ballot_broker),
+            "reach: Ballot Broker must parse with zero Unimplemented: {ballot_broker:#?}"
+        );
         assert!(!has_swallowed_detector(&ballot_broker, "Optional_YouMay"));
 
         let valeyard = parse_named(
@@ -9347,6 +9351,10 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
                 .any(|s| matches!(s.mode, StaticMode::GrantsExtraVote)),
             "reach: The Valeyard's vote static must parse as GrantsExtraVote, got {:#?}",
             valeyard.statics
+        );
+        assert!(
+            !any_ability_has_unimplemented(&valeyard),
+            "reach: The Valeyard must parse with zero Unimplemented: {valeyard:#?}"
         );
         assert!(!has_swallowed_detector(&valeyard, "Optional_YouMay"));
     }
