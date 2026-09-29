@@ -1176,11 +1176,6 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // modes above; without it the swallow auditor false-positives an
             // Optional_YouMay clause and demotes the card from "supported."
             | StaticMode::CastFromHandFree { .. }
-            // CR 701.38d: "While voting, you may vote an additional time" is the
-            // permission itself — the vote session grants +1 vote at the
-            // controller's discretion (Ballot Broker, The Valeyard, Tivit), so
-            // the static's entire semantic content is the "you may".
-            | StaticMode::GrantsExtraVote
     )
 }
 
@@ -9310,13 +9305,21 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
     }
 
-    /// CR 701.38d: "While voting, you may vote an additional time." is the
-    /// permission itself — `StaticMode::GrantsExtraVote` is the static's entire
-    /// semantic content, so the "may" needs no def-level flag. Both printed
-    /// carriers are pinned: Ballot Broker (the vote static alone) and The Valeyard
-    /// (the vote static beside its unrelated villainous-choice sibling).
+    /// CR 701.38d is a TIMING rule for a player who already has multiple votes
+    /// ("those votes all happen at the same time the player would otherwise have
+    /// voted") — it does NOT make the printed "While voting, you may vote an
+    /// additional time." optional. The runtime forces every allocated ballot:
+    /// `game/effects/vote.rs`'s `votes_per_session_for` allocates `1 + extras`
+    /// at vote-session start, and `engine_resolution_choices.rs`'s
+    /// `append_vote_ballot_and_advance` re-opens `WaitingFor::VoteChoice` for
+    /// the same player whenever `remaining_votes > 1` — no action declines an
+    /// allocated extra vote. The printed "you may" is therefore not represented,
+    /// so the Optional_YouMay warning must survive (red-honest). Both printed
+    /// carriers are pinned: Ballot Broker (the vote static alone) and The
+    /// Valeyard (the vote static beside its unrelated villainous-choice
+    /// sibling).
     #[test]
-    fn optional_you_may_accepts_grants_extra_vote() {
+    fn grants_extra_vote_stays_red_until_the_vote_session_can_decline() {
         let ballot_broker = parse_named(
             "While voting, you may vote an additional time. (The votes can be for different \
              choices or for the same choice.)",
@@ -9335,7 +9338,12 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             !any_ability_has_unimplemented(&ballot_broker),
             "reach: Ballot Broker must parse with zero Unimplemented: {ballot_broker:#?}"
         );
-        assert!(!has_swallowed_detector(&ballot_broker, "Optional_YouMay"));
+        assert!(
+            has_swallowed_detector(&ballot_broker, "Optional_YouMay"),
+            "the extra ballot is forced, not offered — the printed 'you may' has no decline \
+             path and must stay red: {:?}",
+            ballot_broker.parse_warnings
+        );
 
         let valeyard = parse_named(
             "If an opponent would face a villainous choice, they face that choice an additional \
@@ -9356,14 +9364,20 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             !any_ability_has_unimplemented(&valeyard),
             "reach: The Valeyard must parse with zero Unimplemented: {valeyard:#?}"
         );
-        assert!(!has_swallowed_detector(&valeyard, "Optional_YouMay"));
+        assert!(
+            has_swallowed_detector(&valeyard, "Optional_YouMay"),
+            "the extra ballot is forced, not offered — the printed 'you may' has no decline \
+             path and must stay red: {:?}",
+            valeyard.parse_warnings
+        );
     }
 
-    /// Hostile sibling of `optional_you_may_accepts_grants_extra_vote`: the same
-    /// vote-family carrier shape with the sibling mode
+    /// Hostile sibling of `grants_extra_vote_stays_red_until_the_vote_session_can_decline`:
+    /// the same vote-family carrier shape with the sibling mode
     /// (`GrantsExtraVillainousChoice`) and the printed vote "you may" — the
-    /// villainous-choice mode is a CR 701.55 replacement, not the CR 701.38d vote
-    /// permission, so the unrepresented "you may" must still warn.
+    /// villainous-choice mode is a CR 701.55 replacement, and the vote mode is a
+    /// forced-allocation static with no decline path, so neither is a CR 701.38d
+    /// "you may" permission and the unrepresented "you may" must still warn.
     #[test]
     fn grants_extra_villainous_choice_is_not_an_optional_permission() {
         let hostile = parsed_with_statics(vec![StaticDefinition::new(
@@ -9372,8 +9386,8 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         let cleaned = "if an opponent would face a villainous choice, they face that choice an \
                        additional time. while voting, you may vote an additional time.";
         // Reach guard: the sibling carrier is present in the unit's evidence, and the
-        // marker is raised; only the mode's absence from the permission set keeps this
-        // red — the vote sibling with the identical marker is a permission.
+        // marker is raised; neither vote-family mode is in the permission set, so the
+        // red-honesty control below keeps the surviving warning a verdict on the carrier.
         let evidence = UnitEvidence::of(&hostile);
         assert!(
             evidence
@@ -9381,8 +9395,9 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             "reach: the villainous-choice static must be present"
         );
         assert!(
-            super::static_mode_is_optional_permission(&StaticMode::GrantsExtraVote),
-            "positive control: the vote permission IS a permission"
+            !super::static_mode_is_optional_permission(&StaticMode::GrantsExtraVote),
+            "red-honesty control: the vote static is not a permission — the runtime forces \
+             every allocated ballot, so the printed 'you may' has no decline path"
         );
         assert!(
             !super::static_mode_is_optional_permission(&StaticMode::GrantsExtraVillainousChoice),

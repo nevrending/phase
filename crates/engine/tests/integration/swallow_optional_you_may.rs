@@ -48,6 +48,8 @@ use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 use std::ops::ControlFlow;
 
+use super::rules::AttackTarget;
+
 const HADES_ORACLE: &str = "Vigilance\n\
     Echo of the Lost — During your turn, you may play cards from your graveyard.\n\
     If a card or token would be put into your graveyard from anywhere, exile it instead.";
@@ -78,6 +80,21 @@ const DRACH_NYEN_ORACLE: &str = "Echo of the First Murder — When Drach'Nyen en
      Daemon Sword — Equipped creature has menace and gets +X/+0, where X is the exiled \
      card's power.\n\
      Equip {2} ({2}: Attach to target creature you control. Equip only as a sorcery.)";
+
+/// Emissary Green — the attack-triggered Council's-dilemma vote whose session
+/// Ballot Broker's extra-vote static modifies. Production path, not a parse
+/// fixture: the trigger, the `WaitingFor::VoteChoice` round-trips, and the
+/// tally all run in `grants_extra_vote_session_forces_the_extra_ballot`.
+const EMISSARY_GREEN_ORACLE: &str = "Whenever Emissary Green attacks, starting with you, \
+     each player votes for profit or security. You create a number of Treasure tokens equal to \
+     twice the number of profit votes. Put a number of +1/+1 counters on each creature you \
+     control equal to the number of security votes.";
+
+/// Ballot Broker — its `GrantsExtraVote` static allocates a second ballot to its
+/// controller at vote-session start. The printed "you may" has no runtime
+/// decline path, which is why these cards stay red-honest.
+const BALLOT_BROKER_ORACLE: &str = "While voting, you may vote an additional time. (The votes \
+     can be for different choices or for the same choice.)";
 
 /// The production parse input for a multi-face card: `build_oracle_face_multi`
 /// skips MTGJSON keywords (B8: cross-face keyword leakage) and substitutes the
@@ -482,5 +499,122 @@ fn labeled_trigger_body_still_parses() {
             .any(|warning| matches!(warning, OracleDiagnostic::SwallowedClause { .. })),
         "Drach'Nyen must parse without swallow findings: {:?}",
         parsed.parse_warnings
+    );
+}
+
+/// CR 701.38d is a timing rule for a player who already has multiple votes
+/// ("those votes all happen at the same time the player would otherwise have
+/// voted"); it does not make the printed "While voting, you may vote an
+/// additional time." optional. The runtime allocates the extra ballot
+/// unconditionally — `game/effects/vote.rs`'s `votes_per_session_for` returns
+/// `1 + extras` at vote-session start — and after every ballot
+/// `engine_resolution_choices.rs`'s `append_vote_ballot_and_advance` re-opens
+/// `WaitingFor::VoteChoice` for the same player whenever `remaining_votes > 1`.
+/// There is no action that declines an allocated vote. This test drives that
+/// production path (attack trigger → vote session → tally) with Ballot Broker
+/// on the battlefield and pins the forced extra ballot: after P0's FIRST ballot
+/// the session immediately re-prompts P0, which is exactly why the
+/// `Optional_YouMay` warning on Ballot Broker stays red-honest.
+#[test]
+fn grants_extra_vote_session_forces_the_extra_ballot() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::DeclareAttackers);
+    let emissary = scenario
+        .add_creature_from_oracle(P0, "Emissary Green", 3, 3, EMISSARY_GREEN_ORACLE)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Ballot Broker", 2, 2, BALLOT_BROKER_ORACLE);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: P0,
+            valid_attacker_ids: vec![emissary],
+            valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+    }
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(emissary, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("declaring Emissary Green as attacker should succeed");
+
+    // Pass priority until the attack-triggered vote prompt appears.
+    for _ in 0..20 {
+        if matches!(runner.state().waiting_for, WaitingFor::VoteChoice { .. }) {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    // Reach guard: Ballot Broker's `GrantsExtraVote` static reached the vote
+    // session — P0 is allocated TWO ballots, not one.
+    match runner.state().waiting_for {
+        WaitingFor::VoteChoice {
+            player,
+            remaining_votes,
+            ..
+        } => {
+            assert_eq!(player, P0, "P0 is the starting voter");
+            assert_eq!(
+                remaining_votes, 2,
+                "reach: Ballot Broker's extra vote must be allocated"
+            );
+        }
+        ref other => panic!("expected P0's first VoteChoice prompt, got {other:?}"),
+    }
+
+    // P0's FIRST ballot. The session must not advance to P1: the allocated
+    // extra ballot is forced and immediately re-prompts the SAME player.
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "profit".to_string(),
+        })
+        .expect("P0's first ballot must be accepted");
+    match runner.state().waiting_for {
+        WaitingFor::VoteChoice {
+            player,
+            remaining_votes,
+            ..
+        } => {
+            assert_eq!(
+                player, P0,
+                "the forced extra ballot belongs to the same player, immediately"
+            );
+            assert_eq!(
+                remaining_votes, 1,
+                "the second ballot is forced — no action declines it"
+            );
+        }
+        ref other => {
+            panic!("after P0's first ballot the session must force the extra ballot, got {other:?}")
+        }
+    }
+
+    // The forced extra ballot is the only way forward: completing it (then
+    // P1's ballot) is what lets the session resolve.
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "security".to_string(),
+        })
+        .expect("P0's forced second ballot must be accepted");
+    let next_voter = match runner.state().waiting_for {
+        WaitingFor::VoteChoice { player, .. } => player,
+        ref other => panic!("expected P1's VoteChoice after P0's ballots, got {other:?}"),
+    };
+    assert_eq!(next_voter, P1, "the queue moves on only after both ballots");
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "profit".to_string(),
+        })
+        .expect("P1's ballot must be accepted");
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::VoteChoice { .. }),
+        "all ballots cast — the session resolves, got {:?}",
+        runner.waiting_for_kind()
     );
 }
