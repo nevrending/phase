@@ -3004,11 +3004,12 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
 /// declaration. The label has no rules meaning (CR 207.2d), so a line shaped
 /// this way must not be claimed by the generic name/parameter split.
 ///
-/// MEASURED, not assumed: 65 corpus lines match `is_keyword_cost_line` and carry
-/// a spaced dash; 43 of them carry a ≤4-word label per
-/// `split_short_label_prefix(text, 4)`. Every one of those 43 except Hades is
-/// claimed by a dedicated arm BEFORE the decline site (Suspend/Awaken/Reinforce/
-/// Prototype/em-dash cost families) or by a router slot before
+/// MEASURED, not assumed: a scan of the `client/public/card-data.json` export's
+/// unique `oracle_text` lines (2026-09-30) finds 58 lines that are
+/// `is_keyword_cost_line` candidates and carry a spaced dash; 36 of them carry a
+/// ≤4-word label per `split_short_label_prefix(text, 4)`. Every one of those 36
+/// except Hades is claimed by a dedicated arm BEFORE the decline site (Suspend/
+/// Awaken/Reinforce/Prototype/em-dash cost families) or by a router slot before
 /// `parse_keyword_line_core` is reached (ability-word-prefixed trigger lines at
 /// priority 6b, Strive's pre-loop scan), so declining here removes exactly the
 /// fabricated parse and leaves the genuine keyword lines untouched. The brace

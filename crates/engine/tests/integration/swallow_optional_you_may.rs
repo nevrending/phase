@@ -366,8 +366,8 @@ fn hades_graveyard_play_permission_is_limited_to_your_turns() {
     assert_cast_rejected(&mut runner, second);
 }
 
-/// CR 207.2d + CR 701.20a: the quoted grants on Kethis and Case of the Uneaten
-/// Feast are carried as `ContinuousModification::AddStaticMode`, which
+/// CR 207.2d + CR 604.2 + CR 305.1: the quoted grants on Kethis and Case of the
+/// Uneaten Feast are carried as `ContinuousModification::AddStaticMode`, which
 /// `static_carries_optional_modification` does not yet recognize — so their
 /// Optional_YouMay warnings must survive and keep the cards demoted.
 /// Conservative-red by design: the fix's scope deliberately excludes the
