@@ -756,6 +756,47 @@ impl UnitEvidence {
             })
             .collect()
     }
+
+    /// Every `ChooseFromZoneConstraint::DistinctCardTypes` carried by a
+    /// `ChooseFromZone` effect on this unit, in walk order — key-anchored per
+    /// [`EFFECT_KEYS`] because the constraint is a field of an `Effect` variant,
+    /// and the bare JSON key `constraint` is reused by other selection shapes
+    /// (`SearchSelectionConstraint`). The carrier is the `Effect` itself, so the
+    /// whole `ChooseFromZone` node must typecheck before its `constraint` field is
+    /// read.
+    ///
+    /// The collecting probe a detector needs when the constraint IS the
+    /// represented quantity: "For each card type, you may put a card of that type
+    /// from among the revealed cards into your hand." (Atraxa, Grand Unifier)
+    /// realizes one pick per card type through `ChooseFromZone { up_to: true,
+    /// constraint: Some(DistinctCardTypes { .. }) }`, so the NUMBER of such
+    /// constraints is the number of represented "for each " occurrences. A
+    /// boolean presence check could not answer that — the same cardinality
+    /// channel [`Self::keywords`] exists for.
+    pub(super) fn choose_from_zone_constraints(
+        &self,
+    ) -> Vec<crate::types::ability::ChooseFromZoneConstraint> {
+        self.collect_at::<crate::types::ability::Effect>(EFFECT_KEYS)
+            .into_iter()
+            .filter_map(|effect| match effect {
+                crate::types::ability::Effect::ChooseFromZone {
+                    constraint: Some(constraint),
+                    ..
+                } => {
+                    // Exhaustive over the constraint vocabulary on purpose: a
+                    // future constraint variant must decide whether it represents
+                    // a card-type iteration rather than defaulting into
+                    // invisibility behind a `_` arm.
+                    match constraint {
+                        crate::types::ability::ChooseFromZoneConstraint::DistinctCardTypes {
+                            ..
+                        } => Some(constraint),
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

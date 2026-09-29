@@ -44,7 +44,7 @@ use crate::types::ability_visit::{
 };
 use crate::types::game_state::RetargetScope;
 use crate::types::keywords::{Keyword, WardCost};
-use crate::types::mana::{ManaCost, ManaExpiry};
+use crate::types::mana::{ManaCost, ManaExpiry, ManaSpellGrant};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::ActivationExemption;
 use crate::types::statics::{CastCostMode, StaticMode};
@@ -905,6 +905,39 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // Veil's "you may activate one of its loyalty abilities once this turn"
         // is the permission itself; the player still decides each activation.
         | Effect::GrantExtraLoyaltyActivations { .. } => true,
+        // CR 706.1 + CR 706.2: "Roll a d20." with a printed result table carries
+        // its "you may" inside a result BRANCH definition ("1—9 | Copy that card.
+        // You may cast the copy." — Wizard's Spellbook), not at the RollDie
+        // effect's own def. The branches are `DieResultBranch` payloads, which
+        // the def-tree walk above cannot see (they are not `sub_ability` /
+        // `else_ability` / `mode_abilities`), so recurse into each branch's own
+        // def tree — the branch is where the optionality lives.
+        Effect::RollDie { results, .. } => {
+            results.iter().any(|branch| def_tree_has_optional(&branch.effect))
+        }
+        // CR 603.3 + CR 707.10c / CR 115.7d: a mana-spend trigger's "you may
+        // choose new targets for the copy" (Primal Wellspring, Pyromancer's
+        // Goggles) lives inside the `TriggerOnSpend` ability payload — the
+        // trigger the mana's controller may put on the stack — not at the
+        // producing def. Walk the granted ability's own def tree.
+        Effect::Mana { grants, .. } => grants.iter().any(|grant| {
+            matches!(
+                grant,
+                ManaSpellGrant::TriggerOnSpend { ability, .. } if def_tree_has_optional(ability)
+            )
+        }),
+        // CR 608.2d: `ChooseFromZone { up_to: true }` ("For each card type, you
+        // may put a card of that type from among the revealed cards into your
+        // hand." — Atraxa, Grand Unifier) lets the chooser select zero cards at
+        // resolution — choosing zero IS the decline, so the "may" is represented
+        // by the effect's own `up_to` parameter without a def-level `optional`
+        // flag (the same internal-optionality shape as `Dig { up_to: true }`).
+        Effect::ChooseFromZone { up_to: true, .. } => true,
+        // CR 608.2g + CR 601.2: `FreeCastFromZones` casts spells during
+        // resolution through the interactive selection loop, which stops early
+        // when the controller declines — every cast is optional, so the "you
+        // may" needs no def-level flag (Plargg and Nassari, Invoke Calamity).
+        Effect::FreeCastFromZones { .. } => true,
         // CR 111.3 + CR 603.5: a token's quoted text is part of its
         // characteristics, including optional triggered abilities. The
         // optionality therefore lives inside the Token's static-ability grant,
@@ -1143,6 +1176,11 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // modes above; without it the swallow auditor false-positives an
             // Optional_YouMay clause and demotes the card from "supported."
             | StaticMode::CastFromHandFree { .. }
+            // CR 701.38d: "While voting, you may vote an additional time" is the
+            // permission itself — the vote session grants +1 vote at the
+            // controller's discretion (Ballot Broker, The Valeyard, Tivit), so
+            // the static's entire semantic content is the "you may".
+            | StaticMode::GrantsExtraVote
     )
 }
 
@@ -2546,6 +2584,41 @@ fn ward_power_life_payments_cover_all_equal_to_markers(
     raised > 0 && represented >= raised
 }
 
+/// CR 205.2 + CR 608.2c/d: true when every `"for each "` occurrence the line
+/// raises is a card-type iteration represented by a `DistinctCardTypes`
+/// `ChooseFromZone` constraint.
+///
+/// **Occurrence-counted, not set-like** — the same consumption contract
+/// [`ward_power_life_payments_cover_all_equal_to_markers`] documents, applied to
+/// the card-type constraint instead of the Ward carrier. "For each card type,
+/// you may put a card of that type from among the revealed cards into your
+/// hand." (Atraxa, Grand Unifier) realizes its per-card-type pick as
+/// `ChooseFromZone { up_to: true, constraint: DistinctCardTypes { .. } }`: the
+/// constraint IS the iteration, so no `QuantityExpr` carrier exists and the
+/// generic quantity probes cannot see it. One represented constraint consumes
+/// exactly one raised `"for each "` occurrence; a unit whose text raises a
+/// second, unrepresented `"for each "` still warns (regression test:
+/// `dynamic_qty_still_warns_for_a_sibling_for_each_beside_a_card_type_constraint`).
+///
+/// The raised marker set must be exactly `["for each "]` — any other marker
+/// belongs to a clause no card-type constraint represents, and is left to the
+/// remaining probes.
+fn for_each_card_type_constraints_cover_all_for_each_markers(
+    cleaned: &str,
+    markers: &[&'static str],
+    evidence: &UnitEvidence,
+) -> bool {
+    // Exactly the one marker this leg can discharge; a second marker kind belongs
+    // to a clause no card-type constraint represents.
+    if markers.len() != 1 || markers[0] != "for each " {
+        return false;
+    }
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let raised = cleaned.matches("for each ").count();
+    let represented = evidence.choose_from_zone_constraints().len();
+    raised > 0 && represented >= raised
+}
+
 /// Oracle text contains dynamic-quantity grammar ("equal to", "for each",
 /// "twice", "where x is", "the number of", "half [poss]") but the parsed
 /// AST contains no dynamic carrier (Ref, Multiply, DivideRounded, Offset,
@@ -2874,6 +2947,16 @@ fn detect_dynamic_qty(
         {
             return;
         }
+    }
+    // CR 205.2 + CR 608.2c/d: "For each card type, you may put a card of that
+    // type from among the revealed cards into your hand." (Atraxa, Grand
+    // Unifier) realizes the per-card-type iteration as a `DistinctCardTypes`
+    // `ChooseFromZone` constraint — the constraint itself is the represented
+    // quantity, not a `QuantityExpr`. One constraint discharges one raised
+    // "for each " occurrence (`for_each_card_type_constraints_cover_all_for_each_markers`),
+    // so a sibling unrepresented "for each " in the same unit still warns.
+    if for_each_card_type_constraints_cover_all_for_each_markers(cleaned, &markers, evidence) {
+        return;
     }
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DynamicQty.detector_label(),
@@ -5501,13 +5584,15 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::ClauseGap; // `pub enum` in oracle_ir::diagnostic
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ContinuousModification, DamageModification, Effect,
+        AbilityDefinition, AbilityKind, CardSelectionMode, ChooseFromZoneConstraint, Chooser,
+        ContinuousModification, CopyRetargetPermission, DamageModification, Effect, ManaProduction,
         OutsideGameSourcePool, PlayerFilter, QuantityExpr, StaticCondition, StaticDefinition,
-        TargetFilter, TriggerCondition,
+        TargetFilter, TriggerCondition, ZoneChoiceCandidateSource, ZoneOwner,
     };
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::TrackedSetId;
     use crate::types::keywords::{Keyword, WardCost};
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaSpellGrant};
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -8958,36 +9043,489 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
-    /// CR 701.20a: Atraxa, Grand Unifier — `you may put a card of that type
-    /// from among the revealed cards into your hand` carries the `from among`
-    /// continuation, so the `is_specialized_put_body` shape guard blocks the
-    /// `you may ` peel; the optionality is encoded as `up_to: true` on the
-    /// internal `ChangeZone` (Dig keep grammar). The refactor must NOT
-    /// regress this — verified via `effect_has_internal_optionality`.
+    /// CR 706.1 + CR 706.2: a d20 result branch's own definition carries the
+    /// "you may" the branch prints ("1—9 | Copy that card. You may cast the
+    /// copy."). Before the `RollDie` recursion, `effect_has_internal_optionality`
+    /// could not see into `results` — they are `DieResultBranch` payloads, not
+    /// `sub_ability` / `else_ability` / `mode_abilities` — so all seven of these
+    /// cards reported a swallowed `Optional_YouMay` while their branch payloads
+    /// carried the choice (`CastFromZone`, `CastCopyOfCard`, `ChangeTargets`,
+    /// `GrantCastingPermission`).
+    ///
+    /// Every negative is preceded by the positive reach guard on the same
+    /// fixture: the verbatim Oracle text (the hostile evidence tree for the
+    /// sibling tests below) parses with zero `Effect::Unimplemented` in the unit
+    /// and the named `RollDie` carrier present; the hostile sibling keeps the
+    /// carrier shape and removes only the optionality.
+    #[test]
+    fn roll_die_branch_optionality_is_evidence() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "{T}: Exile target instant or sorcery card from a graveyard. Roll a d20. \
+                 Activate only as a sorcery.\n\
+                 1—9 | Copy that card. You may cast the copy.\n\
+                 10—19 | Copy that card. You may cast the copy by paying {1} rather than \
+                 paying its mana cost.\n\
+                 20 | Copy each card exiled with this artifact. You may cast any number of \
+                 the copies without paying their mana costs.",
+                "Wizard's Spellbook",
+                &["Artifact"],
+            ),
+            (
+                "Choose target spell or ability with one or more targets. Roll a d20 and add \
+                 the greatest power among creatures you control.\n\
+                 1—14 | You may choose new targets for that spell or ability.\n\
+                 15+ | You may choose new targets for that spell or ability. Then copy it. \
+                 You may choose new targets for the copy.",
+                "Wyll's Reversal",
+                &["Instant"],
+            ),
+            (
+                "Whenever you cast an instant or sorcery spell with mana value 3 or greater, \
+                 roll a d20.\n\
+                 1-9 | Each player draws a card.\n\
+                 10-19 | You draw a card.\n\
+                 20 | Copy that spell. You may choose new targets for the copy.",
+                "Mathise, Surge Channeler",
+                &["Creature"],
+            ),
+            (
+                "Psionic Spells — When this creature enters, choose target instant or sorcery \
+                 card in your graveyard, then roll a d20.\n\
+                 1—9 | You may put that card on top of your library.\n\
+                 10—20 | Return that card to your hand.",
+                "Aberrant Mind Sorcerer",
+                &["Creature"],
+            ),
+            (
+                "Wild Magic Surge — Whenever this creature attacks, roll a d20.\n\
+                 1—9 | Exile the top card of your library. You may play it this turn.\n\
+                 10—19 | Exile the top two cards of your library. You may play them this turn.\n\
+                 20 | Exile the top three cards of your library. You may play them this turn.",
+                "Chaos Channeler",
+                &["Creature"],
+            ),
+            (
+                "Exile target spell, then roll a d20 and add that spell's mana value.\n\
+                 1—14 | You may cast the exiled card for as long as it remains exiled, and \
+                 you may spend mana as though it were mana of any color to cast that spell.\n\
+                 15+ | You may cast the exiled card without paying its mana cost for as long \
+                 as it remains exiled.",
+                "Gale's Redirection",
+                &["Instant"],
+            ),
+            (
+                "{4}, Sacrifice this artifact: Roll a d20.\n\
+                 1 | Trapped! — You lose 3 life.\n\
+                 2—9 | Create five Treasure tokens.\n\
+                 10—19 | You gain 3 life and draw three cards.\n\
+                 20 | Search your library for a card. If it's an artifact card, you may put it \
+                 onto the battlefield. Otherwise, put that card into your hand. Then shuffle.",
+                "Treasure Chest",
+                &["Artifact"],
+            ),
+        ];
+        for (oracle, name, types) in cases {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name} reach guard: production parse must contain zero Unimplemented: {parsed:#?}"
+            );
+            assert!(
+                unit_has_effect(&parsed, &|effect| matches!(effect, Effect::RollDie { .. })),
+                "{name} reach guard: the RollDie carrier must be present"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "Optional_YouMay"),
+                "{name} must account for its printed 'you may' through the die-roll branch \
+                 definitions; warnings: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// Hostile sibling of `roll_die_branch_optionality_is_evidence`: the same
+    /// carrier shape (a d20 with one printed result branch) with the branch's
+    /// optionality removed. The branch def is a bare mandatory `Draw`, so
+    /// nothing represents the printed "you may" and the detector must still
+    /// warn; the paired positive control sets only `def.optional` on the branch
+    /// and silences it.
+    #[test]
+    fn roll_die_mandatory_branches_are_not_optional() {
+        fn hostile_roll(branch_optional: bool) -> AbilityDefinition {
+            let mut branch = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            branch.optional = branch_optional;
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 20,
+                    results: vec![crate::types::ability::DieResultBranch {
+                        min: 1,
+                        max: 9,
+                        effect: Box::new(branch),
+                    }],
+                    modifier: None,
+                },
+            )
+        }
+
+        let cleaned = "roll a d20.\n1—9 | you may draw a card.";
+        let hostile = parsed_with_ability(hostile_roll(false));
+        // Reach guard: the RollDie carrier is present in the evidence tree and the
+        // unit raises the marker, so the warning below cannot be vacuous.
+        let evidence = UnitEvidence::of(&hostile);
+        assert!(
+            evidence.any_effect(|effect| matches!(effect, Effect::RollDie { .. })),
+            "reach: the RollDie carrier must deserialize"
+        );
+        assert_eq!(
+            super::active_dynamic_markers(cleaned, &evidence)
+                .iter()
+                .filter(|marker| **marker == "for each ")
+                .count(),
+            0,
+            "reach: this fixture raises no dynamic marker"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_optional_you_may(cleaned, cleaned, &hostile, &mut diagnostics);
+        assert_eq!(
+            optional_you_may_count(&diagnostics),
+            1,
+            "a mandatory die-roll branch represents no 'you may': {diagnostics:?}"
+        );
+
+        // Positive control: the SAME carrier with only the branch's optionality set.
+        let control = parsed_with_ability(hostile_roll(true));
+        let mut control_diagnostics = Vec::new();
+        super::detect_optional_you_may(cleaned, cleaned, &control, &mut control_diagnostics);
+        assert_eq!(
+            optional_you_may_count(&control_diagnostics),
+            0,
+            "the branch's own optional flag must discharge the marker: {control_diagnostics:?}"
+        );
+    }
+
+    /// CR 603.3 + CR 707.10c / CR 115.7d: the "you may choose new targets for
+    /// the copy" on a mana-spend trigger lives inside the `TriggerOnSpend`
+    /// ability payload — the trigger the mana's controller may put on the stack.
+    /// Before the `Effect::Mana` leg, `effect_has_internal_optionality` saw only
+    /// the producing def, so both of these cards reported a swallowed
+    /// `Optional_YouMay` while their grants carried the retarget permission.
+    ///
+    /// Every negative is preceded by the positive reach guard on the same
+    /// fixture: the verbatim Oracle text parses with zero `Effect::Unimplemented`
+    /// in the unit and the `TriggerOnSpend` grant carrying
+    /// `CopySpell { retarget: MayChooseNewTargets }` present.
+    #[test]
+    fn mana_spend_grant_optionality_is_evidence() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "(Transforms from Primal Amulet.)\n\
+                 {T}: Add one mana of any color. When that mana is spent to cast an instant \
+                 or sorcery spell, copy that spell and you may choose new targets for the copy.",
+                "Primal Wellspring",
+                &["Land"],
+            ),
+            (
+                "{T}: Add {R}. When that mana is spent to cast a red instant or sorcery spell, \
+                 copy that spell and you may choose new targets for the copy.",
+                "Pyromancer's Goggles",
+                &["Artifact"],
+            ),
+        ];
+        for (oracle, name, types) in cases {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name} reach guard: production parse must contain zero Unimplemented: {parsed:#?}"
+            );
+            assert!(
+                unit_has_effect(&parsed, &mana_grant_with_copy_retarget),
+                "{name} reach guard: the TriggerOnSpend grant carrying the retarget permission \
+                 must be present"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "Optional_YouMay"),
+                "{name} must account for its printed 'you may' through the mana-spend grant's \
+                 ability; warnings: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// Hostile sibling of `mana_spend_grant_optionality_is_evidence`: the same
+    /// `Mana → TriggerOnSpend` carrier shape with the retarget permission removed
+    /// (`CopySpell { retarget: KeepOriginalTargets }`). The printed "you may" is
+    /// then represented by nothing and the detector must still warn.
+    #[test]
+    fn mana_spend_grant_without_optional_ability_is_not_optional() {
+        let grant = ManaSpellGrant::TriggerOnSpend {
+            filter: TargetFilter::Any,
+            ability: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CopySpell {
+                    target: TargetFilter::TriggeringSource,
+                    retarget: CopyRetargetPermission::KeepOriginalTargets,
+                    copier: None,
+                    additional_modifications: Vec::new(),
+                    starting_loyalty_from_casualty_sacrifice: false,
+                },
+            )),
+        };
+        let hostile = parsed_with_ability(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: Vec::new(),
+                grants: vec![grant],
+                expiry: None,
+                target: None,
+            },
+        ));
+        // Reach guard: the Mana carrier — with its TriggerOnSpend grant — is
+        // present in the evidence tree.
+        let evidence = UnitEvidence::of(&hostile);
+        assert!(
+            evidence.any_effect(|effect| matches!(effect, Effect::Mana { .. })),
+            "reach: the Mana carrier must deserialize"
+        );
+        let cleaned = "when that mana is spent to cast a red instant or sorcery spell, copy \
+                       that spell and you may choose new targets for the copy.";
+        let mut diagnostics = Vec::new();
+        super::detect_optional_you_may(cleaned, cleaned, &hostile, &mut diagnostics);
+        assert_eq!(
+            optional_you_may_count(&diagnostics),
+            1,
+            "a mana grant whose ability carries no retarget permission represents nothing: \
+             {diagnostics:?}"
+        );
+    }
+
+    /// CR 701.38d: "While voting, you may vote an additional time." is the
+    /// permission itself — `StaticMode::GrantsExtraVote` is the static's entire
+    /// semantic content, so the "may" needs no def-level flag. Both printed
+    /// carriers are pinned: Ballot Broker (the vote static alone) and The Valeyard
+    /// (the vote static beside its unrelated villainous-choice sibling).
+    #[test]
+    fn optional_you_may_accepts_grants_extra_vote() {
+        let ballot_broker = parse_named(
+            "While voting, you may vote an additional time. (The votes can be for different \
+             choices or for the same choice.)",
+            "Ballot Broker",
+            &["Creature"],
+        );
+        assert!(
+            ballot_broker
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::GrantsExtraVote)),
+            "reach: Ballot Broker's static must parse as GrantsExtraVote, got {:#?}",
+            ballot_broker.statics
+        );
+        assert!(!has_swallowed_detector(&ballot_broker, "Optional_YouMay"));
+
+        let valeyard = parse_named(
+            "If an opponent would face a villainous choice, they face that choice an additional \
+             time. (They can make the same or different choices.)\n\
+             While voting, you may vote an additional time.",
+            "The Valeyard",
+            &["Creature"],
+        );
+        assert!(
+            valeyard
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::GrantsExtraVote)),
+            "reach: The Valeyard's vote static must parse as GrantsExtraVote, got {:#?}",
+            valeyard.statics
+        );
+        assert!(!has_swallowed_detector(&valeyard, "Optional_YouMay"));
+    }
+
+    /// Hostile sibling of `optional_you_may_accepts_grants_extra_vote`: the same
+    /// vote-family carrier shape with the sibling mode
+    /// (`GrantsExtraVillainousChoice`) and the printed vote "you may" — the
+    /// villainous-choice mode is a CR 701.55 replacement, not the CR 701.38d vote
+    /// permission, so the unrepresented "you may" must still warn.
+    #[test]
+    fn grants_extra_villainous_choice_is_not_an_optional_permission() {
+        let hostile = parsed_with_statics(vec![StaticDefinition::new(
+            StaticMode::GrantsExtraVillainousChoice,
+        )]);
+        let cleaned = "if an opponent would face a villainous choice, they face that choice an \
+                       additional time. while voting, you may vote an additional time.";
+        // Reach guard: the sibling carrier is present in the unit's evidence, and the
+        // marker is raised; only the mode's absence from the permission set keeps this
+        // red — the vote sibling with the identical marker is a permission.
+        let evidence = UnitEvidence::of(&hostile);
+        assert!(
+            evidence
+                .any_static_mode(|mode| matches!(mode, StaticMode::GrantsExtraVillainousChoice)),
+            "reach: the villainous-choice static must be present"
+        );
+        assert!(
+            super::static_mode_is_optional_permission(&StaticMode::GrantsExtraVote),
+            "positive control: the vote permission IS a permission"
+        );
+        assert!(
+            !super::static_mode_is_optional_permission(&StaticMode::GrantsExtraVillainousChoice),
+            "the villainous-choice sibling is a replacement, not a 'you may' permission"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_optional_you_may(cleaned, cleaned, &hostile, &mut diagnostics);
+        assert_eq!(
+            optional_you_may_count(&diagnostics),
+            1,
+            "an unrepresented vote 'you may' beside the villainous-choice sibling must warn: \
+             {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2g + CR 601.2: `FreeCastFromZones` casts spells during resolution
+    /// through the interactive selection loop, which stops early when the
+    /// controller declines — every cast is optional, so the printed "you may"
+    /// needs no def-level flag. Both cards in the class are pinned together:
+    /// Plargg and Nassari's window is its "you may cast up to two spells", and
+    /// Invoke Calamity's window clears while its two genuine residual gaps
+    /// (`Replacement_Instead`, `Condition_If`) stay red-honest.
+    ///
+    /// Every negative is preceded by the positive reach guard on the same
+    /// fixture: zero `Effect::Unimplemented` in the unit and the named
+    /// `FreeCastFromZones` carrier present.
+    #[test]
+    fn optional_you_may_accepts_free_cast_from_zones_window() {
+        let plargg = parse_named(
+            "At the beginning of your upkeep, each player exiles cards from the top of their \
+             library until they exile a nonland card. An opponent chooses a nonland card exiled \
+             this way. You may cast up to two spells from among the other cards exiled this way \
+             without paying their mana costs.",
+            "Plargg and Nassari",
+            &["Creature"],
+        );
+        assert!(
+            !any_ability_has_unimplemented(&plargg),
+            "Plargg and Nassari reach guard: production parse must contain zero \
+             Unimplemented: {plargg:#?}"
+        );
+        assert!(
+            unit_has_effect(&plargg, &|effect| matches!(
+                effect,
+                Effect::FreeCastFromZones { .. }
+            )),
+            "Plargg and Nassari reach guard: the FreeCastFromZones window must be present"
+        );
+        assert!(
+            !has_swallowed_detector(&plargg, "Optional_YouMay"),
+            "Plargg and Nassari's cast window accounts for its 'you may'; warnings: {:?}",
+            plargg.parse_warnings
+        );
+
+        let invoke = parse_named(
+            "You may cast up to two instant and/or sorcery spells with total mana value 6 or \
+             less from your graveyard and/or hand without paying their mana costs. If those \
+             spells would be put into your graveyard, exile them instead. Exile Invoke Calamity.",
+            "Invoke Calamity",
+            &["Instant"],
+        );
+        assert!(
+            !any_ability_has_unimplemented(&invoke),
+            "Invoke Calamity reach guard: production parse must contain zero \
+             Unimplemented: {invoke:#?}"
+        );
+        assert!(
+            unit_has_effect(&invoke, &|effect| matches!(
+                effect,
+                Effect::FreeCastFromZones { .. }
+            )),
+            "Invoke Calamity reach guard: the FreeCastFromZones window must be present"
+        );
+        assert!(
+            !has_swallowed_detector(&invoke, "Optional_YouMay"),
+            "Invoke Calamity's cast window accounts for its 'you may'; warnings: {:?}",
+            invoke.parse_warnings
+        );
+        assert!(
+            has_swallowed_detector(&invoke, "Replacement_Instead")
+                && has_swallowed_detector(&invoke, "Condition_If"),
+            "Invoke Calamity's residual 'instead'/'if' gaps must stay red-honest; warnings: {:?}",
+            invoke.parse_warnings
+        );
+    }
+
+    /// Atraxa, Grand Unifier's VERBATIM Oracle text, shared by the two
+    /// acceptance tests for the `Optional_YouMay` and `DynamicQty` legs so both
+    /// fixtures are guaranteed identical to the printed card.
+    const ATRAXA_GRAND_UNIFIER_ORACLE: &str = "Flying, vigilance, deathtouch, lifelink\n\
+         When Atraxa enters, reveal the top ten cards of your library. For each card type, \
+         you may put a card of that type from among the revealed cards into your hand. Put \
+         the rest on the bottom of your library in a random order. (Artifact, battle, \
+         creature, enchantment, instant, land, planeswalker, and sorcery are card types.)";
+
+    /// CR 701.20b + CR 608.2d: Atraxa, Grand Unifier — `you may put a card of
+    /// that type from among the revealed cards into your hand` carries the
+    /// `from among` continuation, so the `is_specialized_put_body` shape guard
+    /// blocks the `you may ` peel; the optionality is encoded as `up_to: true` on
+    /// the `ChooseFromZone` (`effect_has_internal_optionality`), and the
+    /// per-card-type "for each " is the `DistinctCardTypes` constraint itself
+    /// (`for_each_card_type_constraints_cover_all_for_each_markers`), not a
+    /// `QuantityExpr`. Both warnings must therefore clear.
     #[test]
     fn optional_you_may_atraxa_grand_unifier_reports_known_gap() {
         let parsed = parse_named(
-            "Flying, vigilance, deathtouch, lifelink\n\
-             When this creature enters, reveal the top ten cards of your library. \
-             For each card type, you may put a card of that type from among the \
-             revealed cards into your hand. Put the rest on the bottom of your \
-             library in a random order.",
+            ATRAXA_GRAND_UNIFIER_ORACLE,
             "Atraxa, Grand Unifier",
             &["Creature"],
         );
 
-        // KNOWN GAP, pinned deliberately — see `condition_as_long_as_accepts_bronze_
-        // horse_and_champions_helm` for the full explanation. Atraxa reports a swallowed
-        // `Optional_YouMay` (and `DynamicQty`), and did so in the shipped card data long
-        // before this change: the per-card-type "you may put a card of that type" choice
-        // is not typed as optional. The test asserted the opposite and passed only
-        // because its empty MTGJSON keyword list turned the "Flying, vigilance,
-        // deathtouch, lifelink" line into an `Effect::Unimplemented`, tripping the
-        // card-wide gate that silenced every detector on the card.
+        // Reach guard: the ETB unit parses with zero Unimplemented (the card-wide
+        // `!any_ability_has_unimplemented` cannot be used here — `parse_named`'s empty
+        // MTGJSON keyword list turns the first keyword line into Unimplemented, which is
+        // a different unit), and the DistinctCardTypes constraint is present.
+        let etb = parsed
+            .triggers
+            .iter()
+            .find(|trigger| matches!(trigger.mode, TriggerMode::ChangesZone))
+            .expect("Atraxa's ETB trigger must parse");
+        let execute = etb
+            .execute
+            .as_deref()
+            .expect("ETB trigger must have execute");
         assert!(
-            has_swallowed_detector(&parsed, "Optional_YouMay"),
-            "pre-existing gap: the per-card-type 'you may put' optionality is not typed. \
-             Warnings: {:?}",
+            !def_tree_has_unimplemented(execute),
+            "reach: the ETB unit parses with zero Unimplemented: {parsed:#?}"
+        );
+        assert!(
+            unit_has_effect(&parsed, &|effect| matches!(
+                effect,
+                Effect::ChooseFromZone {
+                    up_to: true,
+                    constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { .. }),
+                    ..
+                }
+            )),
+            "reach: the ChooseFromZone DistinctCardTypes constraint must be present"
+        );
+        // The two demotions this class no longer deserves: the choice is `up_to`
+        // (declining at resolution), and the per-card-type iteration IS the constraint.
+        assert!(
+            !has_swallowed_detector(&parsed, "Optional_YouMay"),
+            "Atraxa's per-card-type 'you may put' is represented by ChooseFromZone {{ up_to: \
+             true }}; warnings: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "DynamicQty"),
+            "Atraxa's 'for each card type' is represented by the DistinctCardTypes \
+             constraint; warnings: {:?}",
             parsed.parse_warnings
         );
     }
@@ -9531,6 +10069,118 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
     }
 
+    /// CR 205.2 + CR 608.2c/d: a single `DistinctCardTypes` `ChooseFromZone`
+    /// constraint consumes exactly ONE raised "for each " occurrence. The
+    /// direct-probe counterpart of the Atraxa parse test: the evidence tree is
+    /// identical in shape to `dynamic_qty_still_warns_for_a_sibling_marker_beside_affinity`
+    /// (one typed carrier, one sibling clause), so only the OCCURRENCE COUNT can
+    /// distinguish "the constraint represents this iteration" from "the
+    /// constraint is merely somewhere on the unit".
+    #[test]
+    fn dynamic_qty_still_warns_for_a_sibling_for_each_beside_a_card_type_constraint() {
+        let choose = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseFromZone {
+                count: 8,
+                zone: Zone::Library,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller.into(),
+                candidate_source: ZoneChoiceCandidateSource::Legacy,
+                reciprocal_role: None,
+                up_to: true,
+                selection: CardSelectionMode::Chosen,
+                constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes {
+                    categories: vec![CoreType::Artifact, CoreType::Creature],
+                }),
+            },
+        );
+        let parsed = parsed_with_ability(choose);
+        let evidence = UnitEvidence::of(&parsed);
+        let cleaned = "for each card type, you may put a card of that type from among the \
+                       revealed cards into your hand. create a treasure token for each artifact \
+                       you control.";
+        // Reach guard: the constraint carrier is visible to the unit's evidence and the
+        // fixture raises the one marker kind this leg can discharge.
+        assert_eq!(
+            evidence.choose_from_zone_constraints().len(),
+            1,
+            "fixture must expose exactly one represented constraint"
+        );
+        assert_eq!(
+            super::active_dynamic_markers(cleaned, &evidence),
+            vec!["for each "],
+            "fixture must raise exactly the card-type marker"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut diagnostics);
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "one represented constraint discharges one \"for each \" occurrence; the sibling \
+             clause must still warn: {diagnostics:?}"
+        );
+    }
+
+    /// CR 205.2 + CR 608.2c/d: Atraxa, Grand Unifier's "For each card type, you
+    /// may put a card of that type from among the revealed cards into your hand"
+    /// raises exactly one "for each " occurrence, and the parsed
+    /// `ChooseFromZone { up_to: true, constraint: DistinctCardTypes { .. } }`
+    /// represents that iteration — so `DynamicQty` must not fire, even though the
+    /// chosen count lives in `count: u32` rather than a `QuantityExpr`.
+    ///
+    /// Every negative is preceded by the positive reach guard on the same
+    /// fixture: the verbatim Oracle text parses with zero `Effect::Unimplemented`
+    /// in the ETB unit and the named `DistinctCardTypes` constraint present.
+    #[test]
+    fn dynamic_qty_distinct_card_types_constraint_consumes_one_for_each() {
+        let parsed = parse_named(
+            ATRAXA_GRAND_UNIFIER_ORACLE,
+            "Atraxa, Grand Unifier",
+            &["Creature"],
+        );
+        let etb = parsed
+            .triggers
+            .iter()
+            .find(|trigger| matches!(trigger.mode, TriggerMode::ChangesZone))
+            .expect("Atraxa's ETB trigger must parse");
+        let execute = etb
+            .execute
+            .as_deref()
+            .expect("ETB trigger must have execute");
+        assert!(
+            !def_tree_has_unimplemented(execute),
+            "reach: the ETB unit parses with zero Unimplemented: {parsed:#?}"
+        );
+        let evidence = UnitEvidence::of(&parsed);
+        assert_eq!(
+            evidence.choose_from_zone_constraints().len(),
+            1,
+            "reach: exactly one represented card-type constraint must be present"
+        );
+        assert!(
+            evidence
+                .any_effect(|effect| matches!(effect, Effect::ChooseFromZone { up_to: true, .. })),
+            "reach: the choosing-zero decline carrier must be present"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            "for each card type, you may put a card of that type from among the revealed \
+             cards into your hand. put the rest on the bottom of your library in a random \
+             order.",
+            ATRAXA_GRAND_UNIFIER_ORACLE,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            0,
+            "the DistinctCardTypes constraint IS the per-card-type iteration: {diagnostics:?}"
+        );
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
     /// A minimal `ParsedAbilities` carrying exactly the given extracted keywords and
     /// no other definitions — the direct-probe fixture for the Ward evidence leg.
     /// Field list taken verbatim from `ParsedAbilities` in
@@ -9565,6 +10215,153 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
                 _ => None,
             })
             .collect()
+    }
+
+    /// How many `Optional_YouMay` `SwallowedClause` warnings `diagnostics` carries.
+    fn optional_you_may_count(diagnostics: &[OracleDiagnostic]) -> usize {
+        diagnostics
+            .iter()
+            .filter(|warning| {
+                matches!(
+                    warning,
+                    OracleDiagnostic::SwallowedClause { detector, .. }
+                        if detector == "Optional_YouMay"
+                )
+            })
+            .count()
+    }
+
+    /// Does any `Effect` reachable from `def`'s tree satisfy `pred`?
+    ///
+    /// Recursive over the def tree AND into the two nested-def carriers a reach
+    /// guard must be able to name: `Effect::Mana.grants[].ability` (a CR 603.3
+    /// spend trigger that resolves later, so the shared visitor deliberately does
+    /// not descend for conjure purposes) and `Effect::RollDie.results[].effect`
+    /// (a CR 706.2 result branch, not a `sub_ability`). Reach guard only — never
+    /// a parser or resolver authority.
+    fn def_tree_has_effect(def: &AbilityDefinition, pred: &impl Fn(&Effect) -> bool) -> bool {
+        if pred(&def.effect) {
+            return true;
+        }
+        let nested_def_has_effect = match &*def.effect {
+            Effect::RollDie { results, .. } => results
+                .iter()
+                .any(|branch| def_tree_has_effect(&branch.effect, pred)),
+            // CR 603.3: the spend trigger resolves in a later resolution, so the
+            // shared visitor deliberately does not descend into the grant; a
+            // reach guard must.
+            Effect::Mana { grants, .. } => grants.iter().any(|grant| match grant {
+                ManaSpellGrant::TriggerOnSpend { ability, .. } => {
+                    def_tree_has_effect(ability, pred)
+                }
+                _ => false,
+            }),
+            _ => false,
+        };
+        if nested_def_has_effect {
+            return true;
+        }
+        def.sub_ability
+            .as_deref()
+            .is_some_and(|sub| def_tree_has_effect(sub, pred))
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(|els| def_tree_has_effect(els, pred))
+            || def
+                .mode_abilities
+                .iter()
+                .any(|mode| def_tree_has_effect(mode, pred))
+    }
+
+    /// Does any def tree in the unit (abilities, triggers, replacements) satisfy
+    /// `pred` anywhere? The unit-level reach guard.
+    fn unit_has_effect(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        pred: &impl Fn(&Effect) -> bool,
+    ) -> bool {
+        parsed
+            .abilities
+            .iter()
+            .any(|def| def_tree_has_effect(def, pred))
+            || parsed.triggers.iter().any(|trigger| {
+                trigger
+                    .execute
+                    .as_deref()
+                    .is_some_and(|execute| def_tree_has_effect(execute, pred))
+            })
+            || parsed.replacements.iter().any(|replacement| {
+                replacement
+                    .execute
+                    .as_deref()
+                    .is_some_and(|execute| def_tree_has_effect(execute, pred))
+            })
+    }
+
+    /// Reach-guard predicate for the CR 603.3 mana-spend grant: a `Mana` effect
+    /// whose grants carry a `TriggerOnSpend` ability that itself reaches
+    /// `CopySpell { retarget: MayChooseNewTargets }`.
+    fn mana_grant_with_copy_retarget(effect: &Effect) -> bool {
+        let Effect::Mana { grants, .. } = effect else {
+            return false;
+        };
+        grants.iter().any(|grant| match grant {
+            ManaSpellGrant::TriggerOnSpend { ability, .. } => {
+                def_tree_has_effect(ability, &|inner| {
+                    matches!(
+                        inner,
+                        Effect::CopySpell {
+                            retarget: CopyRetargetPermission::MayChooseNewTargets,
+                            ..
+                        }
+                    )
+                })
+            }
+            _ => false,
+        })
+    }
+
+    /// A minimal `ParsedAbilities` carrying exactly the given ability and no
+    /// other definitions — the direct-probe fixture for the hostile Optional_YouMay
+    /// siblings. Field list taken verbatim from `ParsedAbilities` in
+    /// `crates/engine/src/parser/oracle.rs`.
+    fn parsed_with_ability(def: AbilityDefinition) -> crate::parser::oracle::ParsedAbilities {
+        crate::parser::oracle::ParsedAbilities {
+            abilities: vec![def],
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// A minimal `ParsedAbilities` carrying exactly the given statics and no
+    /// other definitions — the direct-probe fixture for the hostile
+    /// `GrantsExtraVillainousChoice` sibling.
+    fn parsed_with_statics(
+        statics: Vec<StaticDefinition>,
+    ) -> crate::parser::oracle::ParsedAbilities {
+        crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics,
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
     }
 
     /// CR 702.21a + CR 608.2h + CR 113.7a: a Compound Ward cost whose components
