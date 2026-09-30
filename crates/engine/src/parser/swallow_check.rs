@@ -10315,7 +10315,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             "fixture must raise exactly the card-type marker"
         );
         let mut diagnostics = Vec::new();
-        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut diagnostics);
+        super::detect_dynamic_qty(cleaned, cleaned, &parsed, &evidence, &mut diagnostics);
         assert_eq!(
             dynamic_qty_descriptions(&diagnostics).len(),
             1,
@@ -10371,6 +10371,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
              cards into your hand. put the rest on the bottom of your library in a random \
              order.",
             ATRAXA_GRAND_UNIFIER_ORACLE,
+            &parsed,
             &evidence,
             &mut diagnostics,
         );
