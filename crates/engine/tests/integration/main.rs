@@ -1798,3 +1798,7 @@ mod professor_hojo_activation_cost;
 mod ripple_reveal_choice_interaction;
 mod siphon_insight_mana_rider;
 mod uba_mask_draw_to_exile_play;
+
+mod celes_kotis_graveyard_origin_batch;
+mod squall_attack_batch_chosen_number;
+mod tifa_additional_combat;
