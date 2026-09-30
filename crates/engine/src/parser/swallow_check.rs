@@ -32,12 +32,13 @@ use super::oracle_ir::feature::{
 use super::oracle_nom::error::OracleError;
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Comparator,
-    ContinuousModification, CopyRetargetPermission, DamageModification, DelayedTriggerCondition,
-    Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope,
-    ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, RestrictionExpiry, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission,
+    ChooseFromZoneConstraint, Comparator, ContinuousModification, CopyRetargetPermission,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
+    ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PlayerFilter, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayScaling,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
@@ -2579,21 +2580,86 @@ fn ward_power_life_payments_cover_all_equal_to_markers(
     raised > 0 && represented >= raised
 }
 
+/// CR 205.2 + CR 608.2c/d: the number of card-type iterations `def`'s tree
+/// represents, one per `DistinctCardTypes` `ChooseFromZone` constraint.
+///
+/// "For each card type, you may put a card of that type from among the revealed
+/// cards into your hand." (Atraxa, Grand Unifier) realizes its per-card-type pick
+/// as `ChooseFromZone { up_to: true, constraint: DistinctCardTypes { .. } }`: the
+/// constraint IS the iteration, so no `QuantityExpr` carrier exists and the
+/// generic quantity probes cannot see it. The walk is the authoritative
+/// [`visit_ability_def`], so every nested carrier (`sub_ability`, `else_ability`,
+/// `mode_abilities`) counts.
+fn def_tree_distinct_card_type_constraint_count(def: &AbilityDefinition) -> usize {
+    let mut count = 0usize;
+    let _ = visit_ability_def(def, &mut |effect| {
+        if matches!(
+            effect,
+            Effect::ChooseFromZone {
+                constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { .. }),
+                ..
+            }
+        ) {
+            count += 1;
+        }
+        ControlFlow::Continue(())
+    });
+    count
+}
+
+/// CR 113.2c + CR 603.1b: the number of card-type iterations the unit's parse
+/// represents. Spell-ability roots are separate printed items and are summed.
+/// Every root in a unit's `scoped` comes from an item starting on the unit's
+/// one source line (`audit_units` / `scope_to_unit`), and that paragraph is one
+/// ability. The parser splits one printed triggered ability with several trigger
+/// conditions into one `TriggerDefinition` per condition, each carrying the
+/// ability's whole instruction list — equal clones or per-condition re-parses —
+/// so the ability counts as the MAX over the unit's trigger roots, never their
+/// sum. CR 113.2c + CR 614.1c / CR 614.1e: likewise a compound replacement head
+/// ("As ~ enters or is turned face up") counts as the max over the unit's
+/// replacement roots. Neither the item id (each split definition is its own
+/// item) nor structural equality (split halves may differ) can identify the
+/// splits; the unit can. Per category the max never exceeds the sum, so it
+/// under-counts (a visible `DynamicQty` gap) when one unit carries two
+/// separately printed triggered abilities (or replacement effects) that each
+/// hold a constraint (CR 113.2c's keyword-line exception). It stays silent,
+/// within the one-line granularity `AuditUnit` accepts, when split roots of one
+/// ability diverge and only some of them carry every printed constraint.
+fn distinct_card_type_constraint_count(scoped: &ParsedAbilities) -> usize {
+    scoped
+        .abilities
+        .iter()
+        .map(def_tree_distinct_card_type_constraint_count)
+        .sum::<usize>()
+        + scoped
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .map(def_tree_distinct_card_type_constraint_count)
+            .max()
+            .unwrap_or(0)
+        + scoped
+            .replacements
+            .iter()
+            .filter_map(|r| r.execute.as_deref())
+            .map(def_tree_distinct_card_type_constraint_count)
+            .max()
+            .unwrap_or(0)
+}
+
 /// CR 205.2 + CR 608.2c/d: true when every `"for each "` occurrence the line
 /// raises is a card-type iteration represented by a `DistinctCardTypes`
 /// `ChooseFromZone` constraint.
 ///
 /// **Occurrence-counted, not set-like** — the same consumption contract
 /// [`ward_power_life_payments_cover_all_equal_to_markers`] documents, applied to
-/// the card-type constraint instead of the Ward carrier. "For each card type,
-/// you may put a card of that type from among the revealed cards into your
-/// hand." (Atraxa, Grand Unifier) realizes its per-card-type pick as
-/// `ChooseFromZone { up_to: true, constraint: DistinctCardTypes { .. } }`: the
-/// constraint IS the iteration, so no `QuantityExpr` carrier exists and the
-/// generic quantity probes cannot see it. One represented constraint consumes
-/// exactly one raised `"for each "` occurrence; a unit whose text raises a
-/// second, unrepresented `"for each "` still warns (regression test:
+/// the card-type constraint instead of the Ward carrier. One represented
+/// constraint consumes exactly one raised `"for each "` occurrence; a unit whose
+/// text raises a second, unrepresented `"for each "` still warns (regression test:
 /// `dynamic_qty_still_warns_for_a_sibling_for_each_beside_a_card_type_constraint`).
+/// CR 113.2c + CR 603.1b: the represented count is root-aware
+/// ([`distinct_card_type_constraint_count`]), so one printed ability split into
+/// several trigger roots counts once rather than once per root.
 ///
 /// The raised marker set must be exactly `["for each "]` — any other marker
 /// belongs to a clause no card-type constraint represents, and is left to the
@@ -2601,7 +2667,7 @@ fn ward_power_life_payments_cover_all_equal_to_markers(
 fn for_each_card_type_constraints_cover_all_for_each_markers(
     cleaned: &str,
     markers: &[&'static str],
-    evidence: &UnitEvidence,
+    scoped: &ParsedAbilities,
 ) -> bool {
     // Exactly the one marker this leg can discharge; a second marker kind belongs
     // to a clause no card-type constraint represents.
@@ -2610,7 +2676,7 @@ fn for_each_card_type_constraints_cover_all_for_each_markers(
     }
     // allow-noncombinator: swallow detector marker scan on classified text
     let raised = cleaned.matches("for each ").count();
-    let represented = evidence.choose_from_zone_constraints().len();
+    let represented = distinct_card_type_constraint_count(scoped);
     raised > 0 && represented >= raised
 }
 
@@ -2951,7 +3017,7 @@ fn detect_dynamic_qty(
     // quantity, not a `QuantityExpr`. One constraint discharges one raised
     // "for each " occurrence (`for_each_card_type_constraints_cover_all_for_each_markers`),
     // so a sibling unrepresented "for each " in the same unit still warns.
-    if for_each_card_type_constraints_cover_all_for_each_markers(cleaned, &markers, evidence) {
+    if for_each_card_type_constraints_cover_all_for_each_markers(cleaned, &markers, scoped) {
         return;
     }
     // CR 608.2c: each printed "For each <population>," is represented by its own
@@ -10270,16 +10336,10 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
     }
 
-    /// CR 205.2 + CR 608.2c/d: a single `DistinctCardTypes` `ChooseFromZone`
-    /// constraint consumes exactly ONE raised "for each " occurrence. The
-    /// direct-probe counterpart of the Atraxa parse test: the evidence tree is
-    /// identical in shape to `dynamic_qty_still_warns_for_a_sibling_marker_beside_affinity`
-    /// (one typed carrier, one sibling clause), so only the OCCURRENCE COUNT can
-    /// distinguish "the constraint represents this iteration" from "the
-    /// constraint is merely somewhere on the unit".
-    #[test]
-    fn dynamic_qty_still_warns_for_a_sibling_for_each_beside_a_card_type_constraint() {
-        let choose = AbilityDefinition::new(
+    /// One `ChooseFromZone { up_to: true, constraint: DistinctCardTypes { .. } }`
+    /// carrier — the parsed representation of the Atraxa per-card-type pick.
+    fn distinct_card_types_choose() -> AbilityDefinition {
+        AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChooseFromZone {
                 count: 8,
@@ -10296,16 +10356,27 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
                     categories: vec![CoreType::Artifact, CoreType::Creature],
                 }),
             },
-        );
-        let parsed = parsed_with_ability(choose);
+        )
+    }
+
+    /// CR 205.2 + CR 608.2c/d: a single `DistinctCardTypes` `ChooseFromZone`
+    /// constraint consumes exactly ONE raised "for each " occurrence. The
+    /// direct-probe counterpart of the Atraxa parse test: the evidence tree is
+    /// identical in shape to `dynamic_qty_still_warns_for_a_sibling_marker_beside_affinity`
+    /// (one typed carrier, one sibling clause), so only the OCCURRENCE COUNT can
+    /// distinguish "the constraint represents this iteration" from "the
+    /// constraint is merely somewhere on the unit".
+    #[test]
+    fn dynamic_qty_still_warns_for_a_sibling_for_each_beside_a_card_type_constraint() {
+        let parsed = parsed_with_ability(distinct_card_types_choose());
         let evidence = UnitEvidence::of(&parsed);
         let cleaned = "for each card type, you may put a card of that type from among the \
                        revealed cards into your hand. create a treasure token for each artifact \
                        you control.";
-        // Reach guard: the constraint carrier is visible to the unit's evidence and the
+        // Reach guard: the root-aware count sees the constraint carrier and the
         // fixture raises the one marker kind this leg can discharge.
         assert_eq!(
-            evidence.choose_from_zone_constraints().len(),
+            super::distinct_card_type_constraint_count(&parsed),
             1,
             "fixture must expose exactly one represented constraint"
         );
@@ -10321,6 +10392,58 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             1,
             "one represented constraint discharges one \"for each \" occurrence; the sibling \
              clause must still warn: {diagnostics:?}"
+        );
+    }
+
+    /// CR 113.2c + CR 603.1b: one printed triggered ability with several trigger
+    /// conditions parses to one trigger root per condition, each carrying the
+    /// ability's whole instruction list — so one `DistinctCardTypes` constraint
+    /// cloned across the split roots is ONE represented card-type iteration,
+    /// counted as the max over the unit's trigger roots, never their sum. A
+    /// whole-unit evidence count would count it once per root and could discharge
+    /// a real sibling gap.
+    #[test]
+    fn dynamic_qty_split_card_type_constraint_roots_count_once() {
+        use crate::types::ability::TriggerDefinition;
+
+        let mut parsed = no_activation_limit_abilities();
+        parsed.triggers = vec![
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(distinct_card_types_choose()),
+            TriggerDefinition::new(TriggerMode::BecomeMonstrous)
+                .execute(distinct_card_types_choose()),
+        ];
+        assert_eq!(
+            super::distinct_card_type_constraint_count(&parsed),
+            1,
+            "two split roots of one ability count once"
+        );
+        let evidence = UnitEvidence::of(&parsed);
+        let single = "for each card type, you may put a card of that type from among the \
+                      revealed cards into your hand.";
+        let sibling = "for each card type, you may put a card of that type from among the \
+                       revealed cards into your hand. create a treasure token for each artifact \
+                       you control.";
+        // Reach guard: with the single-occurrence Atraxa clause alone the same
+        // two-root fixture suppresses — the roots are walked (a skipped walk would
+        // leave `represented = 0 < raised = 1`), and only the occurrence count
+        // keeps the sibling clause reported.
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(single, single, &parsed, &evidence, &mut diagnostics);
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            0,
+            "the split roots represent the one raised \"for each \": {diagnostics:?}"
+        );
+        // Two raised "for each " occurrences against one represented iteration
+        // (max over the split roots, never their sum): exactly the unrepresented
+        // sibling still warns.
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(sibling, sibling, &parsed, &evidence, &mut diagnostics);
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "one represented iteration must not discharge the unrepresented sibling \
+             \"for each \": {diagnostics:?}"
         );
     }
 
@@ -10356,7 +10479,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
         let evidence = UnitEvidence::of(&parsed);
         assert_eq!(
-            evidence.choose_from_zone_constraints().len(),
+            super::distinct_card_type_constraint_count(&parsed),
             1,
             "reach: exactly one represented card-type constraint must be present"
         );
