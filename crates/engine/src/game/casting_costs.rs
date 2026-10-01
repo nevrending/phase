@@ -12700,6 +12700,7 @@ fn handle_resolution_cast_success(
             face_policy,
             zones,
             graveyard_replacement,
+            enters_with_modifications,
             member_pool,
         } => {
             if let Some(destination) = graveyard_replacement.clone() {
@@ -12724,6 +12725,7 @@ fn handle_resolution_cast_success(
                 (*face_policy).clone(),
                 zones.clone(),
                 graveyard_replacement.clone(),
+                enters_with_modifications.clone(),
                 member_pool.clone(),
             );
             let mut candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
@@ -12751,6 +12753,7 @@ fn handle_resolution_cast_success(
                     face_policy: *face_policy,
                     zones,
                     graveyard_replacement,
+                    enters_with_modifications,
                     member_pool,
                 },
             }))
