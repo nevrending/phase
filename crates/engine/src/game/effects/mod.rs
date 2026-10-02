@@ -22640,7 +22640,7 @@ mod tests {
         fn mods_rider() -> ResolvedAbility {
             ResolvedAbility::new(
                 effect_from_json(
-                    r#"{"type":"AddPendingEntersModifications","modifications":[{"type":"AddKeyword","keyword":"Haste"}]}"#,
+                    r#"{"type":"AddPendingEntersModifications","rider":{"modifications":[{"type":"AddKeyword","keyword":"Haste"}]}}"#,
                 ),
                 vec![],
                 ObjectId(1),
@@ -22728,7 +22728,7 @@ mod tests {
             &mut state,
             &copy_parent_with_sub(ResolvedAbility::new(
                 effect_from_json(
-                    r#"{"type":"AddPendingEntersModifications","modifications":[{"type":"AddKeyword","keyword":"Haste"}]}"#,
+                    r#"{"type":"AddPendingEntersModifications","rider":{"modifications":[{"type":"AddKeyword","keyword":"Haste"}]}}"#,
                 ),
                 vec![],
                 ObjectId(1),
@@ -22785,7 +22785,7 @@ mod tests {
         }
         let rider = ResolvedAbility::new(
             effect_from_json(
-                r#"{"type":"AddPendingEntersModifications","modifications":[{"type":"AddKeyword","keyword":"Haste"}]}"#,
+                r#"{"type":"AddPendingEntersModifications","rider":{"modifications":[{"type":"AddKeyword","keyword":"Haste"}]}}"#,
             ),
             vec![],
             ObjectId(1),
@@ -34019,7 +34019,7 @@ mod tests {
 
                         graveyard_replacement: None,
                         enters_with_counter: None,
-                        enters_with_modifications: Vec::new(),
+                        enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
                     },
@@ -34124,7 +34124,7 @@ mod tests {
 
                         graveyard_replacement: None,
                         enters_with_counter: None,
-                        enters_with_modifications: Vec::new(),
+                        enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
                     },
@@ -34202,7 +34202,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 },
