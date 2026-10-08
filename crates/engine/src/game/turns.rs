@@ -1786,6 +1786,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // fresh each turn (mirrors the tap sibling).
     state.object_counter_placement_count_this_turn.clear();
     state.damage_dealt_this_turn.clear();
+    // CR 702.110b + CR 514: Clear the exploit ledger at cleanup.
+    state.creatures_exploited_this_turn.clear();
     // CR 702.173a + CR 514: Clear the Freerunning eligibility ledger at
     // cleanup. CR 702.173a's "was dealt combat damage this turn" predicate
     // is turn-scoped, so the ledger must reset on the turn boundary.
@@ -3992,20 +3994,22 @@ mod tests {
         };
         use crate::types::counter::CounterMatch;
         let controller = state.objects[&object_id].controller;
-        state.add_transient_continuous_effect(
-            object_id,
-            controller,
-            Duration::ForAsLongAs {
-                condition: StaticCondition::RecipientHasCounters {
-                    counters: CounterMatch::OfType(CounterType::Stun),
-                    minimum: 1,
-                    maximum: None,
+        state
+            .add_transient_continuous_effect(
+                object_id,
+                controller,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientHasCounters {
+                        counters: CounterMatch::OfType(CounterType::Stun),
+                        minimum: 1,
+                        maximum: None,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: object_id },
-            vec![ContinuousModification::AddPower { value: 1 }],
-            None,
-        )
+                TargetFilter::SpecificObject { id: object_id },
+                vec![ContinuousModification::AddPower { value: 1 }],
+                None,
+            )
+            .expect("the fixture's duration begins")
     }
 
     #[test]
