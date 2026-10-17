@@ -1774,6 +1774,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }
@@ -1924,6 +1925,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => CharacteristicKinds::EMPTY,
     }
 }
@@ -2064,6 +2066,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }
@@ -2281,6 +2284,12 @@ fn evaluate_condition_inner(
                     .unwrap_or(controller)
             });
             super::players::is_opponent(state, source_controller, state.active_player)
+        }
+        // CR 500.8 + CR 506.1 + CR 608.2c: the first combat phase of the turn
+        // has begun exactly once (the composed possessive form carries its
+        // `DuringYourTurn` scope separately).
+        StaticCondition::FirstCombatPhaseOfTurn => {
+            state.steps_started_this_turn.count(Phase::BeginCombat) == 1
         }
         // CR 103.1: True when the scoped player took the first turn of the
         // game (fixed at game start). The parser emits `ControllerRef::You`.
@@ -4707,6 +4716,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
 }
