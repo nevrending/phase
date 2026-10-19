@@ -284,8 +284,9 @@ struct KurokiDrive {
 /// target prompt with `target`, answer the first `OptionalEffectChoice` (the
 /// announced opponent's draw decision) with `accept_draw`, and answer any later
 /// `OptionalEffectChoice` (the accept continuation's cast offer) with
-/// `accept_later`. Any offered `EffectZoneChoice` card is selected. Stops on the
-/// first post-trigger priority window with an empty stack.
+/// `accept_later`. At most `count` offered `EffectZoneChoice` cards (the first
+/// ones) are selected. Stops on the first post-trigger priority window with an
+/// empty stack.
 fn drive_kuroki(
     runner: &mut GameRunner,
     target: PlayerId,
@@ -330,13 +331,15 @@ fn drive_kuroki(
                     .act(GameAction::DecideOptionalEffect { accept })
                     .expect("the optional decision must be accepted");
             }
-            WaitingFor::EffectZoneChoice { cards, .. } => {
+            WaitingFor::EffectZoneChoice { cards, count, .. } => {
                 drive
                     .hands_at_offer
                     .get_or_insert_with(|| (hand_len(runner, P1), hand_len(runner, P2)));
                 drive.cast_offer_cards += cards.len();
+                // "you may cast a spell": select at most `count` offered cards.
+                let chosen: Vec<ObjectId> = cards.into_iter().take(count).collect();
                 runner
-                    .act(GameAction::SelectCards { cards })
+                    .act(GameAction::SelectCards { cards: chosen })
                     .expect("the cast-offer selection must be accepted");
             }
             WaitingFor::DeclareAttackers { .. } => {
