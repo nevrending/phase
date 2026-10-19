@@ -275,6 +275,9 @@ struct KurokiDrive {
     /// How many `CastFromZone` offer cards surfaced (`EffectZoneChoice`); > 0
     /// means the accept-gated continuation was entered.
     cast_offer_cards: usize,
+    /// `(P1, P2)` hand sizes when the first cast offer surfaced: the announced
+    /// opponent's draw has resolved and no offered spell has been cast yet.
+    hands_at_offer: Option<(usize, usize)>,
 }
 
 /// Drive Kuroki's end-step trigger in a real turn loop: answer the trigger's
@@ -293,6 +296,7 @@ fn drive_kuroki(
     let mut drive = KurokiDrive {
         optional_seats: Vec::new(),
         cast_offer_cards: 0,
+        hands_at_offer: None,
     };
     let mut first = true;
     let mut engaged = false;
@@ -327,6 +331,9 @@ fn drive_kuroki(
                     .expect("the optional decision must be accepted");
             }
             WaitingFor::EffectZoneChoice { cards, .. } => {
+                drive
+                    .hands_at_offer
+                    .get_or_insert_with(|| (hand_len(runner, P1), hand_len(runner, P2)));
                 drive.cast_offer_cards += cards.len();
                 runner
                     .act(GameAction::SelectCards { cards })
@@ -372,7 +379,9 @@ fn drive_kuroki(
 /// Non-regression (plan-v6 §F1′, STOP-AND-RETURN #3): the accept-gated
 /// continuation IS entered (an offer is present — asserting its mere PRESENCE,
 /// not whose hand it draws from), and the `Not(OptionalEffectPerformed)` gate is
-/// suppressed, so no `+1/+1` counters are placed on accept.
+/// suppressed, so no `+1/+1` counters are placed on accept. Hand sizes are read
+/// when the cast offer surfaces, before any offered spell is cast, so the draw
+/// assertions do not depend on which hand the offer reads from.
 #[test]
 fn kuroki_draw_branch_asks_and_draws_only_the_announced_opponent() {
     let (mut runner, kuroki) = kuroki_scenario(42);
@@ -396,14 +405,10 @@ fn kuroki_draw_branch_asks_and_draws_only_the_announced_opponent() {
         "the accept-gated continuation must be entered with an offer present"
     );
     assert_eq!(
-        hand_len(&runner, P2),
-        p2_before + 4,
-        "the announced opponent drew four cards"
-    );
-    assert_eq!(
-        hand_len(&runner, P1),
-        p1_before,
-        "the other opponent must not be asked or draw"
+        drive.hands_at_offer,
+        Some((p1_before, p2_before + 4)),
+        "at the cast offer the announced opponent (P2) has drawn four cards and \
+         the other opponent (P1) has drawn none"
     );
     assert_eq!(
         plus_counters(&runner, kuroki),
